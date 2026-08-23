@@ -1,18 +1,17 @@
 import asyncio
 import os
-import pytest
-from sortedcontainers import SortedSet
 from typing import override
 
 
 import tiny_parallel_pipeline as tpp
 
 
-from tiny_parallel_pipeline.entities.resource_test import DummyResource
+from tiny_parallel_pipeline.resource_test import DummyResource
 
 
-# --- Test-specific subclass ---
-
+#
+# Test-specific subclass
+#
 
 class DummyTransitionCalculation(tpp.TransitionCalculation):
     def __init__(self, name, in_res=None, out_res=None,
@@ -40,19 +39,19 @@ class DummyTransitionCalculation(tpp.TransitionCalculation):
         return True, None
 
 
-# --- Tests ---
+#
+# Tests
+#
 
 class TestDummyTransitionCalculation:
-    def test_init(self):
-        t = DummyTransitionCalculation(name='Dummy-A')
-        assert str(t) == (
+    def test_repr(self):
+        assert str(DummyTransitionCalculation(name='Dummy-A')) == (
             '<DummyTransitionCalculation Dummy-A : '
             '[<DummyResource id=DummyResource:in status=EMPTY data=empty>] -> '
             '[<DummyResource id=DummyResource:out status=EMPTY data=empty>]>')
-
-    def test_fluent(self):
         t = (DummyTransitionCalculation(name='Dummy-A')
-                .set_in_resources(DummyResource('IN=0'), DummyResource('IN=1'))
+                .set_in_resources(DummyResource('IN=0'))
+                .extend_in_resources(DummyResource('IN=1'))
                 .set_out_resources(DummyResource('OUT=0'))
                 .compile())
         assert str(t) == (
@@ -62,46 +61,27 @@ class TestDummyTransitionCalculation:
             '[<DummyResource id=DummyResource:OUT=0 status=EMPTY data=empty>]>')
 
     def test_hashable(self):
-        s = (DummyTransitionCalculation(name='Dummy-A')
-                .set_in_resources(DummyResource('IN=0'))
-                .extend_in_resources(DummyResource('IN=1'))
-                .set_out_resources(DummyResource('OUT=2'))
-                .compile())
-        t = (DummyTransitionCalculation(name='Dummy-B')
-                .set_in_resources(DummyResource('IN=3'))
-                .set_out_resources(DummyResource('OUT=4'))
-                .compile())
-        assert s == s
-        assert s != t
+        s = DummyTransitionCalculation(name='Dummy-A')
+        t = DummyTransitionCalculation(name='Dummy-B')
+        assert s == s and s != t
+        transition2name = {s: s.name, t: t.name}
+        assert (transition2name[s], transition2name[t]) == ('Dummy-A', 'Dummy-B')
 
-        transition2name = dict()
-        transition2name[s] = s.name
-        transition2name[t] = t.name
-
-        assert transition2name[s] == 'Dummy-A'
-        assert transition2name[t] == 'Dummy-B'
-
-    # @pytest.mark.asyncio
     def test_execute(self):
-        r1 = (DummyResource('IN=0')
-            .populate_data('d=111')
-            .update_status(tpp.ResourceStatus.READY))
-        r2 = (DummyResource('IN=1')
-            .populate_data('d=222')
-            .update_status(tpp.ResourceStatus.READY))
+        r1 = DummyResource('IN=0').populate_data('d=111').update_status(tpp.ResourceStatus.READY)
+        r2 = DummyResource('IN=1').populate_data('d=222').update_status(tpp.ResourceStatus.READY)
         r3 = DummyResource('OUT=0')
         t = (DummyTransitionCalculation(name='Dummy-A')
                 .set_in_resources(r1, r2)
                 .set_out_resources(r3)
                 .compile())
-
         assert str(t) == (
             '<DummyTransitionCalculation Dummy-A : '
             '[<DummyResource id=DummyResource:IN=0 status=READY data=set>,'
             ' <DummyResource id=DummyResource:IN=1 status=READY data=set>] -> '
             '[<DummyResource id=DummyResource:OUT=0 status=EMPTY data=empty>]>')
 
-        asyncio.run(t.execute())
+        assert asyncio.run(t.execute()) == (True, None)
 
         assert str(t) == (
             '<DummyTransitionCalculation Dummy-A : '

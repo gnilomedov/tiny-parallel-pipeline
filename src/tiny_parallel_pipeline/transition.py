@@ -1,19 +1,28 @@
-import asyncio
+"""Transitions: the steps that turn input resources into output resources."""
+
+
 from abc import ABC, abstractmethod
-import multiprocessing
 
 
 from tiny_parallel_pipeline import ResourceStatus, Resource
 
 
 class TransitionCalculation(ABC):
-    def __init__(self, name: str | None = None, allow_multiprocess_pool: bool = False):
+    """Base class for one pipeline step. A subclass does the work in `_execute_impl`."""
+    def __init__(self, name: str | None = None, allow_multiprocess_pool: bool = False,
+                 retries_count: int = 1):
         self._name = name
         self._allow_multiprocess_pool = allow_multiprocess_pool
+        self._retries_count = retries_count
         self._in_resources: list[Resource] | None = []
         self._out_resources: list[Resource] | None = []
+        self._termination_requested = False
 
         self._compiled = False
+
+    def terminate(self) -> None:
+        """Ask _execute_impl to bail out at its next await point."""
+        self._termination_requested = True
 
     def set_name(self, name: str) -> 'Transition':
         self._name = name
@@ -70,18 +79,28 @@ class TransitionCalculation(ABC):
         return id(self)
 
     async def execute(self) -> tuple[bool, str]:
+        """Checks the inputs are ready, runs `_execute_impl`, then marks the outputs ready."""
         for r in self._in_resources:
             assert r.status == ResourceStatus.READY
             assert r.data is not None, str(r)
         for r in self._out_resources:
             r.update_status(ResourceStatus.IN_PROGRESS)
 
-        is_ok, err_msg = await self._execute_impl(self._in_resources, self._out_resources)
+        for attempt in range(self._retries_count):
+            is_ok, err_msg = await self._execute_impl(self._in_resources, self._out_resources)
+            if is_ok or self._termination_requested:
+                break
+            retries_left = self._retries_count - attempt - 1
+            if retries_left > 0:
+                print(f'[WARN] {self._name}: {err_msg}\n'
+                      f'[WARN] {self._name}: will retry {retries_left} more times')
 
-#
-        for r in self._out_resources:
-            r.update_status(ResourceStatus.READY)
-#
+        if is_ok:
+            for r in self._out_resources:
+                r.update_status(ResourceStatus.READY)
+        else:
+            for r in self._out_resources:
+                r.update_status(ResourceStatus.FAILED, err_msg)
 
         return is_ok, err_msg
 
@@ -92,7 +111,7 @@ class TransitionCalculation(ABC):
     def post_execute_populate_out_resource_data(self, async_out_resources: list[Resource]) -> None:
         for mr, ar in zip(self._out_resources, async_out_resources):
             mr.populate_data(ar.data)
-            mr.update_status(ar.status)
+            mr.update_status(ar.status, ar.failed_reason)
 
     def __repr__(self) -> str:
         ress2repr = lambda ress: repr(ress) if ress else repr([repr(r) for r in ress])

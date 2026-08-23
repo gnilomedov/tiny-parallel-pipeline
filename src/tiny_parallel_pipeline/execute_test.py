@@ -1,18 +1,17 @@
 import asyncio
 import multiprocessing
 import os
-import pytest
-from sortedcontainers import SortedSet
-from typing import override
 
 
 import tiny_parallel_pipeline as tpp
 
-from tiny_parallel_pipeline.entities.resource_test import DummyResource
-from tiny_parallel_pipeline.entities.transition_test import DummyTransitionCalculation
+from tiny_parallel_pipeline.resource_test import DummyResource
+from tiny_parallel_pipeline.transition_test import DummyTransitionCalculation
 
 
-# --- Tests ---
+#
+# Scheduler tests
+#
 
 class TestScheduler:
     def test_compile_ok_ready(self):
@@ -101,7 +100,6 @@ class TestScheduler:
         scheduler.mark_transitions_in_progress(t12)
         assert [t.name for t in scheduler.get_ready_to_execute_transitions()] == ['T23']
 
-    # async def test_on_transition_succeed(self):
     def test_on_transition_succeed(self):
         r1 = DummyResource('A').update_status(tpp.ResourceStatus.READY).populate_data('data-A')
         r2 = DummyResource('B')
@@ -135,9 +133,11 @@ class TestScheduler:
         assert scheduler.remaining_resources_count() == 0
 
 
-# @pytest.mark.asyncio
+#
+# Executor tests
+#
+
 class TestExecutor:
-    # async def test_executor_runs_all_transitions(self):
     def test_executor_runs_all_transitions(self):
         r1 = DummyResource('A').populate_data('d1').update_status(tpp.ResourceStatus.READY)
         r2 = DummyResource('B').populate_data('d2').update_status(tpp.ResourceStatus.READY)
@@ -160,7 +160,6 @@ class TestExecutor:
         assert is_ok, err_msg
 
         executor = tpp.Executor(scheduler)
-        # await executor.run()
         asyncio.run(executor.run())
 
         assert r3.status == tpp.ResourceStatus.READY
@@ -196,7 +195,6 @@ class TestExecutor:
         num_pool_workers = 3
         pool = multiprocessing.Pool(num_pool_workers)
         executor = tpp.Executor(scheduler, pool)
-        # await executor.run()
         asyncio.run(executor.run())
 
         assert set(r.status for r in resources) == {tpp.ResourceStatus.READY}
