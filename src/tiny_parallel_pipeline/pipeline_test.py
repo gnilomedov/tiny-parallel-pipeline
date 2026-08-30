@@ -22,6 +22,11 @@ class ListDir(tpp.ResourcesDir):
         self.items = [DummyResource('L0'), DummyResource('L1')]
         self.dirs = [LeafDir(), LeafDir()]
 
+class DictDir(tpp.ResourcesDir):
+    def __init__(self):
+        self.by_key = {'AAPL': DummyResource('D0'), 'MSFT': DummyResource('D1')}
+        self.dirs = {'x': LeafDir()}
+
 class NestedDir(tpp.ResourcesDir):
     def __init__(self):
         self.seed = (DummyResource('SEED')
@@ -43,9 +48,9 @@ def transitions(resources):
     class Transitions(tpp.TransitionsDir):
         def __init__(self):
             self.first = DummyTransitionCalculation(
-                'T1', in_res=[resources.seed], out_res=[resources.leaf.a])
+                'T1', {'seed': resources.seed}, {'a': resources.leaf.a})
             self.second = DummyTransitionCalculation(
-                'T2', in_res=[resources.leaf.a], out_res=[resources.leaf.b])
+                'T2', {'a': resources.leaf.a}, {'b': resources.leaf.b})
     return Transitions()
 
 
@@ -63,6 +68,12 @@ class TestDir:
         assert [p for p, _ in ListDir().walk()] == [
             'items[0]', 'items[1]', 'dirs[0].a', 'dirs[0].b', 'dirs[1].a', 'dirs[1].b']
 
+    def test_walk_dict(self):
+        d = DictDir()
+        assert [p for p, _ in d.walk()] == [
+            "by_key['AAPL']", "by_key['MSFT']", "dirs['x'].a", "dirs['x'].b"]
+        assert dict(d.walk())["by_key['MSFT']"] is d.by_key['MSFT']
+
     def test_assert_contract_ok(self, resources):
         class OuterDir(tpp.ResourcesDir):
             def __init__(self):
@@ -70,6 +81,7 @@ class TestDir:
         resources.assert_contract(tpp.Resource)
         OuterDir().assert_contract(tpp.Resource)
         ListDir().assert_contract(tpp.Resource)
+        DictDir().assert_contract(tpp.Resource)
 
     def test_assert_contract_rejects_leaf(self):
         class BadDir(tpp.ResourcesDir):
@@ -91,6 +103,13 @@ class TestDir:
                            match=r'BadListDir\.oops\[1\] is str, want Resource or Dir'):
             BadListDir().assert_contract(tpp.Resource)
 
+        class BadDictDir(tpp.ResourcesDir):
+            def __init__(self):
+                self.oops = {'ok': DummyResource('OK'), 'bad': 'not a resource'}
+        with pytest.raises(AssertionError,
+                           match=r"BadDictDir\.oops\['bad'\] is str, want Resource or Dir"):
+            BadDictDir().assert_contract(tpp.Resource)
+
     def test_all_in_declaration_order(self, transitions):
         assert [t.name for t in transitions.all()] == ['T1', 'T2']
 
@@ -98,8 +117,16 @@ class TestDir:
         class Transitions(tpp.TransitionsDir):
             def __init__(self):
                 self.many = [
-                    DummyTransitionCalculation('T1', out_res=[resources.leaf.a]),
-                    DummyTransitionCalculation('T2', out_res=[resources.leaf.b])]
+                    DummyTransitionCalculation('T1', {}, {'a': resources.leaf.a}),
+                    DummyTransitionCalculation('T2', {}, {'b': resources.leaf.b})]
+        assert [t.name for t in Transitions().all()] == ['T1', 'T2']
+
+    def test_all_flattens_dicts(self, resources):
+        class Transitions(tpp.TransitionsDir):
+            def __init__(self):
+                self.many = {
+                    'a': DummyTransitionCalculation('T1', {}, {'a': resources.leaf.a}),
+                    'b': DummyTransitionCalculation('T2', {}, {'b': resources.leaf.b})}
         assert [t.name for t in Transitions().all()] == ['T1', 'T2']
 
 
@@ -135,6 +162,6 @@ class TestPipeline:
         class Transitions(tpp.TransitionsDir):
             def __init__(self):
                 self.only = DummyTransitionCalculation(  # leaf.b has no producer
-                    'T1', in_res=[resources.leaf.b], out_res=[resources.leaf.a])
+                    'T1', {'b': resources.leaf.b}, {'a': resources.leaf.a})
         with pytest.raises(AssertionError, match='No transition to calculate'):
             tpp.Pipeline(resources, Transitions()).scheduler()

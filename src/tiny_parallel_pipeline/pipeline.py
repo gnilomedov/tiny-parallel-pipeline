@@ -9,7 +9,7 @@ from tiny_parallel_pipeline import (
 
 
 class Dir:
-    """Attributes are all `leaf_class` instances, nested `Dir`s, or lists of either."""
+    """Attributes are all `leaf_class` instances, nested `Dir`s, or lists/dicts of either."""
 
     def walk(self, prefix: str = '') -> Iterator[tuple[str, object]]:
         for name, value in vars(self).items():
@@ -27,6 +27,9 @@ class Dir:
         elif isinstance(value, list):
             for i, item in enumerate(value):
                 yield from self._walk_value(f'{path}[{i}]', item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield from self._walk_value(f'{path}[{key!r}]', item)
         else:
             yield path, value
 

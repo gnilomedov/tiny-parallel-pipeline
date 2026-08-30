@@ -17,7 +17,7 @@ class TestScheduler:
     def test_compile_ok_ready(self):
         r1 = DummyResource('A').update_status(tpp.ResourceStatus.READY)
         r2 = DummyResource('B')
-        t = DummyTransitionCalculation('T1').set_in_resources(r1).set_out_resources(r2)
+        t = DummyTransitionCalculation('T1', {'a': r1}, {'b': r2})
 
         scheduler = tpp.Scheduler().add_resources(r1, r2).add_transitions(t)
 
@@ -32,7 +32,7 @@ class TestScheduler:
     def test_compile_ok_input_less(self):
         r1 = DummyResource('A')
         r2 = DummyResource('B')
-        t = DummyTransitionCalculation('T1').set_in_resources().set_out_resources(r1, r2)
+        t = DummyTransitionCalculation('T1', {}, {'a': r1, 'b': r2})
 
         scheduler = tpp.Scheduler().add_transitions(t).pull_all_resources_from_transitions()
 
@@ -42,7 +42,7 @@ class TestScheduler:
     def test_compile_unreachable(self):
         r1 = DummyResource('A')
         r2 = DummyResource('B')
-        t = DummyTransitionCalculation('T1').set_in_resources(r1).set_out_resources(r2)
+        t = DummyTransitionCalculation('T1', {'a': r1}, {'b': r2})
 
         scheduler = tpp.Scheduler().add_resources(r1, r2).add_transitions(t)
 
@@ -57,8 +57,8 @@ class TestScheduler:
     def test_compile_loop(self):
         r1 = DummyResource('A')
         r2 = DummyResource('B')
-        t1 = DummyTransitionCalculation('T1').set_in_resources(r1).set_out_resources(r2)
-        t2 = DummyTransitionCalculation('T2').set_in_resources(r2).set_out_resources(r1)
+        t1 = DummyTransitionCalculation('T1', {'a': r1}, {'b': r2})
+        t2 = DummyTransitionCalculation('T2', {'b': r2}, {'a': r1})
 
         scheduler = tpp.Scheduler().add_transitions(t1, t2).pull_all_resources_from_transitions()
 
@@ -67,13 +67,13 @@ class TestScheduler:
         assert err_msg.split('\n') == [
                 'Dependency loop',
                 '<DummyResource id=DummyResource:A status=EMPTY data=empty>',
-                '<DummyTransitionCalculation T2 : [<DummyResource id=DummyResource:B '
-                    'status=EMPTY data=empty>] -> [<DummyResource id=DummyResource:A status=EMPTY '
-                    'data=empty>]>',
+                '<DummyTransitionCalculation T2 : {b: <DummyResource id=DummyResource:B '
+                    'status=EMPTY data=empty>} -> {a: <DummyResource id=DummyResource:A '
+                    'status=EMPTY data=empty>}>',
                 '<DummyResource id=DummyResource:B status=EMPTY data=empty>',
-                '<DummyTransitionCalculation T1 : [<DummyResource id=DummyResource:A '
-                    'status=EMPTY data=empty>] -> [<DummyResource id=DummyResource:B status=EMPTY '
-                    'data=empty>]>',
+                '<DummyTransitionCalculation T1 : {a: <DummyResource id=DummyResource:A '
+                    'status=EMPTY data=empty>} -> {b: <DummyResource id=DummyResource:B '
+                    'status=EMPTY data=empty>}>',
                 '<DummyResource id=DummyResource:A status=EMPTY data=empty>',
             ]
 
@@ -83,15 +83,15 @@ class TestScheduler:
         r3 = DummyResource('C')
 
         scheduler = tpp.Scheduler().add_transitions(
-                DummyTransitionCalculation('T12').set_in_resources(r1).set_out_resources(r2),
-                DummyTransitionCalculation('T23').set_in_resources(r2).set_out_resources(r3)
+                DummyTransitionCalculation('T12', {'a': r1}, {'b': r2}),
+                DummyTransitionCalculation('T23', {'b': r2}, {'c': r3})
             ).pull_all_resources_from_transitions()
         is_ok, err_msg = scheduler.compile()
         assert is_ok, err_msg
         assert [t.name for t in scheduler.get_ready_to_execute_transitions()] == ['T12']
 
-        t12 = DummyTransitionCalculation('T12').set_in_resources(r1).set_out_resources(r2)
-        t23 = DummyTransitionCalculation('T23').set_in_resources().set_out_resources(r3)
+        t12 = DummyTransitionCalculation('T12', {'a': r1}, {'b': r2})
+        t23 = DummyTransitionCalculation('T23', {}, {'c': r3})
         scheduler = tpp.Scheduler().add_transitions(t12, t23).pull_all_resources_from_transitions()
         is_ok, err_msg = scheduler.compile()
         assert is_ok, err_msg
@@ -106,8 +106,8 @@ class TestScheduler:
         r3 = DummyResource('C')
 
         scheduler = tpp.Scheduler().add_transitions(
-                DummyTransitionCalculation('T12').set_in_resources(r1).set_out_resources(r2),
-                DummyTransitionCalculation('T23').set_in_resources(r2).set_out_resources(r3)
+                DummyTransitionCalculation('T12', {'a': r1}, {'b': r2}),
+                DummyTransitionCalculation('T23', {'b': r2}, {'c': r3})
             ).pull_all_resources_from_transitions()
         is_ok, err_msg = scheduler.compile()
         assert is_ok, err_msg
@@ -145,15 +145,10 @@ class TestExecutor:
         r4 = DummyResource('D')
         r5 = DummyResource('E')
 
-        t1 = (DummyTransitionCalculation('T13', data_add_pid=True)
-            .set_in_resources(r1)
-            .set_out_resources(r3))
-        t2 = (DummyTransitionCalculation('T24', data_add_pid=True)
-            .set_in_resources(r2)
-            .set_out_resources(r4))
-        t3 = (DummyTransitionCalculation('T145', data_add_pid=True)
-            .set_in_resources(r1, r4)
-            .set_out_resources(r5))
+        t1 = DummyTransitionCalculation('T13', {'a': r1}, {'c': r3}, data_add_pid=True)
+        t2 = DummyTransitionCalculation('T24', {'b': r2}, {'d': r4}, data_add_pid=True)
+        t3 = DummyTransitionCalculation('T145', {'a': r1, 'd': r4}, {'e': r5},
+                                        data_add_pid=True)
 
         scheduler = tpp.Scheduler().add_transitions(t1, t2, t3).pull_all_resources_from_transitions()
         is_ok, err_msg = scheduler.compile()
@@ -174,15 +169,14 @@ class TestExecutor:
     def test_executor_runs_race_condition(self):
         resources = [DummyResource(f'r{i}') for i in range(10)]
         resources[0].populate_data(f'd0').update_status(tpp.ResourceStatus.READY)
-        transitions = [DummyTransitionCalculation(f'T1', data_add_pid=True,
-                                                  allow_multiprocess_pool=True)
-            .set_in_resources(resources[0])
-            .set_out_resources(resources[1])]
+        transitions = [DummyTransitionCalculation(
+            f'T1', {'seed': resources[0]}, {'made': resources[1]},
+            data_add_pid=True, allow_multiprocess_pool=True)]
         transitions += [
-            DummyTransitionCalculation(f'T{i}', data_add_pid=True,
-                                       allow_multiprocess_pool=True)
-                    .set_in_resources(resources[0], resources[1])
-                    .set_out_resources(resources[i])
+            DummyTransitionCalculation(
+                    f'T{i}', {'seed': resources[0], 'made': resources[1]},
+                    {'made': resources[i]},
+                    data_add_pid=True, allow_multiprocess_pool=True)
                 for i in range(2, len(resources))
         ]
 

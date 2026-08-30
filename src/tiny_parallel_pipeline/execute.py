@@ -11,6 +11,7 @@ import time
 
 from tiny_parallel_pipeline import (
     ResourceStatus, ResourceID, Resource, TransitionCalculation)
+from tiny_parallel_pipeline.utils import trim_list
 
 
 class Scheduler:
@@ -68,8 +69,9 @@ class Scheduler:
             raise ValueError('Frozen after compiled.')
         self._id2resource.clear()
         for t in self._transition2status.keys():
-            for r in t._in_resources + t._out_resources:
-                self._id2resource[r.id] = r
+            for resources in (t._in_resources, t._out_resources):
+                for r in resources.values():
+                    self._id2resource[r.id] = r
         return self
 
     def compile(self) -> tuple[bool, str | None]:
@@ -80,7 +82,7 @@ class Scheduler:
 
         for t, s in self._transition2status.items():
             seen_resource_ids = set();
-            for r in t._in_resources:
+            for r in t._in_resources.values():
                 if r.status == ResourceStatus.EMPTY:
                     if r.id in seen_resource_ids:
                         return (False, f'{repr(r)} multiple times in {repr(t)}')
@@ -89,7 +91,7 @@ class Scheduler:
                     if r.id not in self._resource_id_2_dependent_transitions:
                         self._resource_id_2_dependent_transitions[r.id] = []
                     self._resource_id_2_dependent_transitions[r.id].append(t)
-            for r in t._out_resources:
+            for r in t._out_resources.values():
                 if r.id in self._resource_id_2_from_transition:
                     return (
                         False, f'{repr(r)} out of multiple transitions {repr(t)} and ' +
@@ -111,7 +113,7 @@ class Scheduler:
             t = self._resource_id_2_from_transition[r.id]
             self._want_transitions.add(t)
             dependency_stack.append(repr(t))
-            for dr in t._in_resources:
+            for dr in t._in_resources.values():
                 err_msg = dfs(dr)
                 if err_msg is not None:
                     return err_msg
@@ -148,8 +150,7 @@ class Scheduler:
         """Marks the outputs ready and unlocks the transitions that waited for them."""
         self._transition2status[transition].status = Scheduler._TransitionStatus._Status.SUCCEED
         self._want_transitions.remove(transition)
-        print(f'[INFO] ready resources: {[repr(r) for r in transition._out_resources]}')
-        for r in transition._out_resources:
+        for r in transition._out_resources.values():
             assert r.status == ResourceStatus.READY
             self._want_resource_ids.discard(r.id)  # may be a by-product of a wanted one
             if r.id not in self._resource_id_2_dependent_transitions:
@@ -173,21 +174,30 @@ class Scheduler:
 class Executor:
     """Runs ready transitions concurrently until every wanted resource is ready."""
     def __init__(self, scheduler: Scheduler,
-                 pool: multiprocessing.Pool = None):
+                 pool: multiprocessing.Pool = None,
+                 log_len: int = 100, log_period_s: float = 2.0):
         self._scheduler = scheduler
         self._pool = pool
+        self._log_len = log_len  # a trimmed list still has to show the ids, not just their edges
+        self._log_period_s = log_period_s  # else a fast fan-out scrolls a line per completion
 
     async def run(self) -> tuple[bool, str | None]:
         """Main loop: start every ready transition, wait for the first to end, repeat."""
-        pending: set[asyncio.Task] = set()
+        log_info_last_ts = 0.0
+        log_info_next_pending = True
+
         task2time_started: dict[asyncio.Task, float] = dict()
         task2transition: dict[asyncio.Task, TransitionCalculation] = dict()
+
+        pending: set[asyncio.Task] = set()
+
         while self._scheduler.remaining_resources_count() > 0 or len(pending) > 0:
             transition_bucket = self._scheduler.get_ready_to_execute_transitions()
             assert len(transition_bucket) > 0 or len(pending) > 0
-            if transition_bucket:
-                print(f'[INFO] pending {_task_names(pending)} += '
-                      f'{[t.name for t in transition_bucket]}')
+            if transition_bucket and log_info_next_pending:
+                print(f'       pending {len(pending) + len(transition_bucket): 5d} '
+                      f'{trim_list(_task_names(pending), max_len=self._log_len)} '
+                      f'+= {trim_list([t.name for t in transition_bucket], max_len=self._log_len)}')
             self._scheduler.mark_transitions_in_progress(*transition_bucket)
             for transition in transition_bucket:
                 if self._pool is not None and transition.allow_multiprocess_pool:
@@ -201,8 +211,8 @@ class Executor:
             done_tasks, still_pending = await asyncio.wait(
                 pending, return_when=asyncio.FIRST_COMPLETED)
             pending = still_pending
-            print(f'[INFO] pending {_task_names(pending)} -= '
-                  f'{_task_names(done_tasks, task2time_started)}')
+            done_names = _task_names(done_tasks, task2time_started)
+            ready_resources = []
             for task in done_tasks:
                 del task2time_started[task]
                 transition, is_ok, err_msg = task.result()
@@ -212,6 +222,15 @@ class Executor:
                     await asyncio.gather(*pending, return_exceptions=True)
                     return False, f'{transition.name} failed: {err_msg}'
                 self._scheduler.on_transition_succeed(transition)
+                ready_resources += [repr(r) for r in transition._out_resources.values()]
+
+            if log_info_next_pending := time.monotonic() - log_info_last_ts >= self._log_period_s:
+                log_info_last_ts = time.monotonic()
+                print(f'[INFO] pending {len(pending): 5d} '
+                      f'{trim_list(_task_names(pending), max_len=self._log_len)} '
+                      f'-= {trim_list(done_names, max_len=self._log_len)}\n'
+                      f'       ready resources: '
+                      f'{trim_list(ready_resources, max_len=self._log_len)}')
 
         return True, None
 

@@ -1,32 +1,27 @@
-.PHONY: run-polyhasher run-ffmpeg test clean
+.PHONY: install-ephemeral-4-py install-ephemeral-4-uv test run-ffmpeg run-semaphore clean
 
-TMP := $(shell python3 -c 'import tempfile; print(tempfile.gettempdir())')
 SRC := $(CURDIR)/src
-EXAMPLE := $(CURDIR)/example
-RUN_DIR ?= $(TMP)/tiny-parallel-pipeline-run
-POOL ?= 0
-VIDEO ?= $(TMP)/video.mp4
-YT_DLP ?= $(TMP)/yt-dlp
-SOURCE ?= https://www.youtube.com/watch?v=tIeHLnjs5U8
 
-run-polyhasher:
-	mkdir -p $(RUN_DIR)
-	cd $(RUN_DIR) && time PYTHONPATH=$(SRC) python3 $(EXAMPLE)/yt-dlp-polyhasher.py \
-		--pool-workers $(POOL) --video-url $(SOURCE) \
-		--video-local-path $(VIDEO) --yt-dlp-local-bin $(YT_DLP) $(ARGS)
-	ls -lht $(VIDEO) $(YT_DLP)
-
-run-ffmpeg:
-	mkdir -p $(RUN_DIR)
-	cd $(RUN_DIR) && time PYTHONPATH=$(SRC) python3 $(EXAMPLE)/yt-dlp-ffmpeg.py \
-		--source $(SOURCE) $(ARGS)
-	ls -lht $(RUN_DIR)
+# The interpreter's stdlib dir is the only one every uv env inherits (not site-packages,
+# and user-site is off in venvs). Ephemeral: pins one build, so a patch upgrade drops it.
+install-ephemeral-4-py:
+	@stdlib=$$(python -c 'import os; print(os.path.dirname(os.__file__))'); \
+	ln -sfn $(SRC)/tiny_parallel_pipeline $$stdlib/tiny_parallel_pipeline; \
+	ls -l $$stdlib/tiny_parallel_pipeline
+install-ephemeral-4-uv:
+	@stdlib=$$(uv run --no-project --managed-python \
+		python -c 'import os; print(os.path.dirname(os.__file__))'); \
+	ln -sfn $(SRC)/tiny_parallel_pipeline $$stdlib/tiny_parallel_pipeline; \
+	ls -l $$stdlib/tiny_parallel_pipeline
 
 test:
 	PYTHONPATH=src python3 -m pytest src -v
 
+# The examples own their own knobs; command line overrides reach the sub-make on their own.
+run-ffmpeg run-semaphore:
+	$(MAKE) -C examples $@
+
 clean:
-	test -n "$(TMP)"
-	rm -rf $(RUN_DIR) $(TMP)/tiny_parallel_pipeline $(TMP)/video* $(VIDEO) $(YT_DLP)
+	d="$${TMPDIR:-/tmp}"; rm -rf $$d/gate* $$d/yt-dlp-ffmpeg-*
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 	rm -rf .pytest_cache

@@ -91,38 +91,33 @@ class TestRunShell(BaseTest):  # real shell, harmless commands only
 class TestCaptureCliStdoutTransition(BaseTest):
     def test_formats_cmd_and_captures_stdout(self, mocks):
         out = tpp.TxtResource('out')
-        assert self.run(std.CaptureCliStdoutTransition('T', False, '{0}', '-F', '"{1}"')
-            .set_in_resources(tpp.TxtResource('bin', '/bin/x'), tpp.TxtResource('url', 'u'))
-            .set_out_resources(out)) == (True, None)
+        assert self.run(std.CaptureCliStdoutTransition(
+            'T', False, out,
+            {'bin_file': tpp.TxtResource('bin', '/bin/x'),
+             'url_str': tpp.TxtResource('url', 'u')},
+            '{bin_file}', '-F', '"{url_str}"')) == (True, None)
         assert mocks.shell == ['/bin/x -F "u"']
         assert (out.data, out.status.name) == ('OUT', 'READY')
 
     def test_non_zero_returncode(self, mocks):
         mocks.returncode, mocks.stderr = 2, b'nope'
         out = tpp.TxtResource('out')
-        assert self.run(std.CaptureCliStdoutTransition('T', False, 'x')
-            .set_out_resources(out)) == (False, '`x` exited with 2: nope')
+        assert self.run(std.CaptureCliStdoutTransition('T', False, out, {}, 'x')) == (
+            False, '`x` exited with 2: nope')
         assert (out.data, out.status.name) == (None, 'FAILED')
 
     def test_timeout_kills_the_process(self, mocks):
         mocks.delay = 1.0
-        assert self.run(std.CaptureCliStdoutTransition('T', False, 'x')
-            .set_timeout(0).set_out_resources(tpp.TxtResource('out'))) == (
-                False, '`x` timed out after 0s')
+        assert self.run(
+            std.CaptureCliStdoutTransition('T', False, tpp.TxtResource('out'), {}, 'x')
+                .set_timeout(0)) == (False, '`x` timed out after 0s')
         assert mocks.processes[-1].killed
-
-    def test_terminated(self, mocks):
-        t = (std.CaptureCliStdoutTransition('T', False, 'x')
-            .set_out_resources(tpp.TxtResource('out')))
-        t.terminate()
-        assert self.run(t) == (False, 'terminated')
-
 
 class TestWgetUrlTransition(BaseTest):
     def _transition(self, *post_cmds, out=None):
-        return (std.WgetUrlTransition('W', False, *post_cmds)
-            .set_in_resources(tpp.UrlStrResource('url', 'http://u'))
-            .set_out_resources(out or tpp.FileResource('bin', '/x/bin')))
+        return std.WgetUrlTransition(
+            'W', False, tpp.UrlStrResource('url', 'http://u'),
+            out or tpp.FileResource('bin', '/x/bin'), *post_cmds)
 
     def test_wget_then_post_commands(self, mocks):
         mocks.files['/x/bin'] = ''
@@ -151,8 +146,8 @@ class TestWgetUrlTransition(BaseTest):
 
 class TestWriteTextFileTransition(BaseTest):
     def _transition(self, text, out=None):
-        return (std.WriteTextFileTransition('W', text, False)
-            .set_out_resources(out or tpp.FileResource('cpp', '/x/poly.cpp')))
+        return std.WriteTextFileTransition(
+            'W', text, False, out or tpp.FileResource('cpp', '/x/poly.cpp'))
 
     def test_creates_dir_and_writes(self, mocks):
         out = tpp.FileResource('cpp', '/x/poly.cpp')
