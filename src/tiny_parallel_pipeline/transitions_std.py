@@ -3,7 +3,8 @@
 
 import asyncio
 import os
-from typing import override
+from types import SimpleNamespace
+from typing import override, Self
 
 
 from tiny_parallel_pipeline import Resource, ResourceStatus, TransitionCalculation
@@ -11,20 +12,21 @@ from tiny_parallel_pipeline import Resource, ResourceStatus, TransitionCalculati
 
 class CaptureCliStdoutTransition(TransitionCalculation):
     """Runs a shell command; `{name}` in it is filled from the inputs, stdout goes to `stdout_txt`."""
-    def __init__(self, name, allow_multiprocess_pool, out_stdout_txt: Resource,
-                 in_name_2_resource: dict[str, Resource], *cmd: list[str]):
+    def __init__(self, name: str, allow_multiprocess_pool: bool, out_stdout_txt: Resource,
+                 in_name_2_resource: dict[str, Resource], *cmd: str):
         super().__init__(name, allow_multiprocess_pool=allow_multiprocess_pool)
         self._set_in_resources(**in_name_2_resource)
         self._set_out_resources(stdout_txt=out_stdout_txt)
         self._cmd = list(cmd)
         self._timeout = None
 
-    def set_timeout(self, timeout: int | None):
+    def set_timeout(self, timeout: int | None) -> Self:
         self._timeout = timeout
         return self
 
     @override
-    async def _execute_impl(self, in_resources, out_resources):
+    async def _execute_impl(self, in_resources: SimpleNamespace,
+                            out_resources: SimpleNamespace) -> tuple[bool, str | None]:
         cmd = ' '.join(c.format(**{n: r.data for n, r in vars(in_resources).items()})
                        for c in self._cmd)
         process = await asyncio.create_subprocess_shell(
@@ -50,15 +52,16 @@ class CaptureCliStdoutTransition(TransitionCalculation):
 
 class WgetUrlTransition(TransitionCalculation):
     """Downloads the `url_str` input to the `dst_file` output, then runs any post commands."""
-    def __init__(self, name, allow_multiprocess_pool, in_url_str: Resource,
-                 out_dst_file: Resource, *post_wget_file_commands):
+    def __init__(self, name: str, allow_multiprocess_pool: bool, in_url_str: Resource,
+                 out_dst_file: Resource, *post_wget_file_commands: str):
         super().__init__(name, allow_multiprocess_pool=allow_multiprocess_pool)
         self._set_in_resources(url_str=in_url_str)
         self._set_out_resources(dst_file=out_dst_file)
         self._post_wget_file_commands = post_wget_file_commands
 
     @override
-    async def _execute_impl(self, in_resources, out_resources):
+    async def _execute_impl(self, in_resources: SimpleNamespace,
+                            out_resources: SimpleNamespace) -> tuple[bool, str | None]:
         out_file_path = out_resources.dst_file.expect_ready_file_at
         is_ok, err_msg = await run_shell(
             f'wget "{in_resources.url_str.data}" -O "{out_file_path}"')
@@ -78,13 +81,15 @@ class WgetUrlTransition(TransitionCalculation):
 
 class WriteTextFileTransition(TransitionCalculation):
     """Writes fixed text to the `dst_file` output, but only when the text changed."""
-    def __init__(self, name, text, allow_multiprocess_pool, out_dst_file: Resource):
+    def __init__(self, name: str, text: str, allow_multiprocess_pool: bool,
+                 out_dst_file: Resource):
         super().__init__(name, allow_multiprocess_pool=allow_multiprocess_pool)
         self._set_out_resources(dst_file=out_dst_file)
         self._text = text
 
     @override
-    async def _execute_impl(self, in_resources, out_resources):
+    async def _execute_impl(self, in_resources: SimpleNamespace,
+                            out_resources: SimpleNamespace) -> tuple[bool, str | None]:
         out_file_path = out_resources.dst_file.expect_ready_file_at
         os.makedirs(os.path.dirname(out_file_path), exist_ok=True)
         # Keep mtime stable when unchanged so downstream staleness checks can skip work.
@@ -95,7 +100,8 @@ class WriteTextFileTransition(TransitionCalculation):
         return True, None
 
 
-async def run_shell(cmd: str, stdout=asyncio.subprocess.DEVNULL) -> tuple[bool, str | None]:
+async def run_shell(cmd: str, stdout: int = asyncio.subprocess.DEVNULL
+                    ) -> tuple[bool, str | None]:
     """Runs a shell command. Returns (False, stderr) when it fails, else the captured stdout."""
     process = await asyncio.create_subprocess_shell(
         cmd,

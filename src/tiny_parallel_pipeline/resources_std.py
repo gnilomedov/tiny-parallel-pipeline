@@ -1,14 +1,14 @@
 """Common resource types: a file on disk, a piece of text, a URL."""
 
 
-from typing import override
+from typing import Any, override, Self
 
 
 from tiny_parallel_pipeline import ResourceStatus, Resource
 
 
 class FileResource(Resource):
-    """A file the pipeline will create. `data` becomes its path once it is there."""
+    """.data: str -- the path, set once the file is actually at `expect_ready_file_at`."""
     def __init__(self, in_class_id: str, expect_ready_file_at: str, is_ready: bool = False):
         super().__init__(in_class_id=in_class_id)
         self.expect_ready_file_at = expect_ready_file_at
@@ -16,12 +16,13 @@ class FileResource(Resource):
             self.populate_data(expect_ready_file_at).update_status(ResourceStatus.READY)
 
     @override
-    def populate_data(self, new_data: any):
+    def populate_data(self, new_data: Any) -> Self:
         assert new_data == self.expect_ready_file_at, f'{new_data} != {self.expect_ready_file_at}'
         return super().populate_data(new_data)
 
 
 class TxtResource(Resource):
+    """.data: str -- the text itself, READY up front when the constructor was handed it."""
     def __init__(self, in_class_id: str, ready_txt_data: str | None = None):
         super().__init__(in_class_id=in_class_id)
         if ready_txt_data is not None:
@@ -29,6 +30,7 @@ class TxtResource(Resource):
 
 
 class UrlStrResource(Resource):
+    """.data: str -- the URL to fetch, READY up front when the constructor was handed it."""
     def __init__(self, in_class_id: str, url_address_data: str | None = None):
         super().__init__(in_class_id=in_class_id)
         if url_address_data is not None:

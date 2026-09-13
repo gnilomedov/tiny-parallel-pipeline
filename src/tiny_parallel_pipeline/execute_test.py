@@ -6,7 +6,8 @@ import os
 import tiny_parallel_pipeline as tpp
 
 from tiny_parallel_pipeline.resource_test import DummyResource
-from tiny_parallel_pipeline.transition_test import DummyTransitionCalculation
+from tiny_parallel_pipeline.transition_test import (
+    DummyTransitionCalculation, FlakyTransitionCalculation)
 
 
 #
@@ -76,6 +77,22 @@ class TestScheduler:
                     'status=EMPTY data=empty>}>',
                 '<DummyResource id=DummyResource:A status=EMPTY data=empty>',
             ]
+
+    def test_compile_rejects_duplicate_wiring(self):
+        dup = DummyResource('A')
+        t = DummyTransitionCalculation('T1', {'x': dup, 'y': dup}, {'b': DummyResource('B')})
+        scheduler = tpp.Scheduler().add_transitions(t).pull_all_resources_from_transitions()
+        is_ok, err_msg = scheduler.compile()
+        assert not is_ok and 'multiple times in' in err_msg
+
+        seed = DummyResource('A').update_status(tpp.ResourceStatus.READY)
+        out = DummyResource('B')
+        scheduler = tpp.Scheduler().add_transitions(
+                DummyTransitionCalculation('T1', {'a': seed}, {'b': out}),
+                DummyTransitionCalculation('T2', {'a': seed}, {'b': out})
+            ).pull_all_resources_from_transitions()
+        is_ok, err_msg = scheduler.compile()
+        assert not is_ok and 'out of multiple transitions' in err_msg
 
     def test_ready_to_execute_transitions(self):
         r1 = DummyResource('A').update_status(tpp.ResourceStatus.READY)
@@ -165,6 +182,23 @@ class TestExecutor:
         assert r4.data[0] == 'by T24 B'
         assert r5.data[0] == 'by T145 A|D'
 
+
+    def test_run_stops_at_the_first_failure_and_terminates_what_is_pending(self):
+        seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
+        bad_out, slow_out = DummyResource('BAD'), DummyResource('SLOW')
+        bad = FlakyTransitionCalculation('Bad', bad_out, fail_times=9, retries_count=1)
+        slow = DummyTransitionCalculation('Slow', {'seed': seed}, {'slow': slow_out},
+                                          simulate_async_sleep_period=0.05)
+
+        scheduler = tpp.Scheduler().add_transitions(
+            bad, slow).pull_all_resources_from_transitions()
+        is_ok, err_msg = scheduler.compile()
+        assert is_ok, err_msg
+
+        assert asyncio.run(tpp.Executor(scheduler).run()) == (False, 'Bad failed: boom 1')
+        assert bad_out.status == tpp.ResourceStatus.FAILED
+        # Nothing still in flight is left running once the run is doomed.
+        assert slow._termination_requested
 
     def test_executor_runs_race_condition(self):
         resources = [DummyResource(f'r{i}') for i in range(10)]

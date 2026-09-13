@@ -74,6 +74,11 @@ class TestDir:
             "by_key['AAPL']", "by_key['MSFT']", "dirs['x'].a", "dirs['x'].b"]
         assert dict(d.walk())["by_key['MSFT']"] is d.by_key['MSFT']
 
+        class MixedDir(tpp.ResourcesDir):
+            def __init__(self):
+                self.mix = {'k': [LeafDir()]}
+        assert [p for p, _ in MixedDir().walk()] == ["mix['k'][0].a", "mix['k'][0].b"]
+
     def test_assert_contract_ok(self, resources):
         class OuterDir(tpp.ResourcesDir):
             def __init__(self):

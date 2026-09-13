@@ -5,12 +5,14 @@ import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum, auto
-import multiprocessing
+import multiprocessing.pool
 import time
+from typing import Self
 
 
 from tiny_parallel_pipeline import (
     ResourceStatus, ResourceID, Resource, TransitionCalculation)
+from tiny_parallel_pipeline.transition import NamedResources
 from tiny_parallel_pipeline.utils import trim_list
 
 
@@ -27,11 +29,11 @@ class Scheduler:
         status: _Status = _Status.UNSCHEDULED
         failure_message: str | None = None
 
-        def __repr__(self):
+        def __repr__(self) -> str:
             return (f'deps: {self.dependency_count} status: {self.status.name} '
                     f'msg: {self.failure_message}')
 
-        def __str__(self):
+        def __str__(self) -> str:
             return repr(self)
 
 
@@ -40,8 +42,7 @@ class Scheduler:
         self._transition2status: dict[TransitionCalculation, Scheduler._TransitionStatus] = dict()
 
         self._resource_id_2_from_transition: dict[ResourceID, TransitionCalculation] = dict()
-        self._resource_id_2_dependent_transitions: dict[ResourceID,
-                                                        list[TransitionCalculation]] = dict()
+        self._resource_id_2_dependent_transitions: dict[ResourceID, list[TransitionCalculation]] = dict()
 
         self._ready_to_execute_transitions = []
 
@@ -50,28 +51,27 @@ class Scheduler:
 
         self._compiled = False
 
-    def add_resources(self, *resources) -> 'Scheduler':
+    def add_resources(self, *resources: Resource) -> Self:
         if self._compiled:
             raise ValueError('Frozen after compiled.')
         for r in resources:
             self._id2resource[r.id] = r
         return self
 
-    def add_transitions(self, *transitions) -> 'Scheduler':
+    def add_transitions(self, *transitions: TransitionCalculation) -> Self:
         if self._compiled:
             raise ValueError('Frozen after compiled.')
         for t in transitions:
             self._transition2status[t] = Scheduler._TransitionStatus()
         return self
 
-    def pull_all_resources_from_transitions(self) -> 'Scheduler':
+    def pull_all_resources_from_transitions(self) -> Self:
         if self._compiled:
             raise ValueError('Frozen after compiled.')
         self._id2resource.clear()
         for t in self._transition2status.keys():
-            for resources in (t._in_resources, t._out_resources):
-                for r in resources.values():
-                    self._id2resource[r.id] = r
+            for r in (*t.in_resources_flat(), *t.out_resources_flat()):
+                self._id2resource[r.id] = r
         return self
 
     def compile(self) -> tuple[bool, str | None]:
@@ -82,7 +82,7 @@ class Scheduler:
 
         for t, s in self._transition2status.items():
             seen_resource_ids = set();
-            for r in t._in_resources.values():
+            for r in t.in_resources_flat():
                 if r.status == ResourceStatus.EMPTY:
                     if r.id in seen_resource_ids:
                         return (False, f'{repr(r)} multiple times in {repr(t)}')
@@ -91,7 +91,7 @@ class Scheduler:
                     if r.id not in self._resource_id_2_dependent_transitions:
                         self._resource_id_2_dependent_transitions[r.id] = []
                     self._resource_id_2_dependent_transitions[r.id].append(t)
-            for r in t._out_resources.values():
+            for r in t.out_resources_flat():
                 if r.id in self._resource_id_2_from_transition:
                     return (
                         False, f'{repr(r)} out of multiple transitions {repr(t)} and ' +
@@ -113,7 +113,7 @@ class Scheduler:
             t = self._resource_id_2_from_transition[r.id]
             self._want_transitions.add(t)
             dependency_stack.append(repr(t))
-            for dr in t._in_resources.values():
+            for dr in t.in_resources_flat():
                 err_msg = dfs(dr)
                 if err_msg is not None:
                     return err_msg
@@ -141,7 +141,7 @@ class Scheduler:
     def get_ready_to_execute_transitions(self) -> list[TransitionCalculation]:
         return list(self._ready_to_execute_transitions)
 
-    def mark_transitions_in_progress(self, *transitions: list[TransitionCalculation]) -> None:
+    def mark_transitions_in_progress(self, *transitions: TransitionCalculation) -> None:
         for t in transitions:
             self._transition2status[t].status = Scheduler._TransitionStatus._Status.IN_PROGRESS
         self._refilter_ready_to_execute_transitions()
@@ -150,7 +150,7 @@ class Scheduler:
         """Marks the outputs ready and unlocks the transitions that waited for them."""
         self._transition2status[transition].status = Scheduler._TransitionStatus._Status.SUCCEED
         self._want_transitions.remove(transition)
-        for r in transition._out_resources.values():
+        for r in transition.out_resources_flat():
             assert r.status == ResourceStatus.READY
             self._want_resource_ids.discard(r.id)  # may be a by-product of a wanted one
             if r.id not in self._resource_id_2_dependent_transitions:
@@ -163,10 +163,10 @@ class Scheduler:
                     self._ready_to_execute_transitions.append(t)
         self._refilter_ready_to_execute_transitions()
 
-    def remaining_resources_count(self):
+    def remaining_resources_count(self) -> int:
         return len(self._want_resource_ids)
 
-    def _refilter_ready_to_execute_transitions(self):
+    def _refilter_ready_to_execute_transitions(self) -> None:
         self._ready_to_execute_transitions = [t for t in self._ready_to_execute_transitions
             if self._transition2status[t].status == Scheduler._TransitionStatus._Status.UNSCHEDULED]
 
@@ -174,7 +174,7 @@ class Scheduler:
 class Executor:
     """Runs ready transitions concurrently until every wanted resource is ready."""
     def __init__(self, scheduler: Scheduler,
-                 pool: multiprocessing.Pool = None,
+                 pool: multiprocessing.pool.Pool | None = None,
                  log_len: int = 100, log_period_s: float = 2.0):
         self._scheduler = scheduler
         self._pool = pool
@@ -222,7 +222,7 @@ class Executor:
                     await asyncio.gather(*pending, return_exceptions=True)
                     return False, f'{transition.name} failed: {err_msg}'
                 self._scheduler.on_transition_succeed(transition)
-                ready_resources += [repr(r) for r in transition._out_resources.values()]
+                ready_resources += [repr(r) for r in transition.out_resources_flat()]
 
             if log_info_next_pending := time.monotonic() - log_info_last_ts >= self._log_period_s:
                 log_info_last_ts = time.monotonic()
@@ -235,8 +235,7 @@ class Executor:
         return True, None
 
 
-def _task_names(tasks: set[asyncio.Task],
-                task2time_started: dict[asyncio.Task, float] | None = None) -> list[str]:
+def _task_names(tasks: set[asyncio.Task], task2time_started: dict[asyncio.Task, float] | None = None) -> list[str]:
     if task2time_started is None:
         return sorted(t.get_name() for t in tasks)
     return sorted(
@@ -247,15 +246,16 @@ def _task_names(tasks: set[asyncio.Task],
 
 def _transition_as_asyncio_task(
         transition: TransitionCalculation
-        ) -> asyncio.Task[tuple[TransitionCalculation, bool, str]]:
+        ) -> asyncio.Task[tuple[TransitionCalculation, bool, str | None]]:
     async def impl():
         is_ok, err_msg = await transition.execute()
         return transition, is_ok, err_msg
     return asyncio.create_task(impl(), name=transition.name)
 
 
-def _transition_as_asyncio_task_in_pool(transition: TransitionCalculation,
-                                        pool: multiprocessing.Pool) -> asyncio.Task:
+def _transition_as_asyncio_task_in_pool(
+        transition: TransitionCalculation, pool: multiprocessing.pool.Pool
+        ) -> asyncio.Task[tuple[TransitionCalculation, bool, str | None]]:
     async def impl():
         loop = asyncio.get_event_loop()
         is_ok, err_msg, out_resources = await loop.run_in_executor(
@@ -267,6 +267,6 @@ def _transition_as_asyncio_task_in_pool(transition: TransitionCalculation,
     return asyncio.create_task(impl(), name=transition.name)
 
 
-def _run_transition_execute(transition: TransitionCalculation):
+def _run_transition_execute(transition: TransitionCalculation) -> tuple[bool, str | None, NamedResources]:
     is_ok, err_msg = asyncio.run(transition.execute())
     return is_ok, err_msg, transition._out_resources

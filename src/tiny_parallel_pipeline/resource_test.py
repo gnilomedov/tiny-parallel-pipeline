@@ -46,26 +46,20 @@ class TestResourceBehavior:
         assert isinstance(resource.id, tpp.ResourceID)
         assert str(resource.id) == 'DummyResource:001'
 
-    def test_resource_update_status(self, resource):
-        resource.update_status(tpp.ResourceStatus.IN_PROGRESS)
-        assert resource.status == tpp.ResourceStatus.IN_PROGRESS
+    def test_resource_setters_are_fluent(self):
+        r = DummyResource(in_class_id='001')
 
-    def test_resource_populate_data(self, resource):
-        resource.populate_data('Data example')
-        assert resource.data == 'Data example'
+        assert r.update_status(tpp.ResourceStatus.IN_PROGRESS).populate_data('Data example') is r
+        assert (r.status, r.data) == (tpp.ResourceStatus.IN_PROGRESS, 'Data example')
 
     def test_resource_equality(self):
         r1, r2, r3 = self._resources('A', 'A', 'B')
         assert r1 == r2
         assert r1 != r3
 
-    def test_resource_comparison(self):
+    def test_resource_ordering(self):
         r1, r2 = self._resources('A', 'B')
-        assert r1 < r2
-        assert r2 > r1
-        assert not r1 > r2
-
-    def test_resource_sortable(self):
+        assert r1 < r2 and r2 > r1 and not r1 > r2
         assert self._short_ids(sorted(self._resources('Q', 'W', 'E'))) == ['E', 'Q', 'W']
 
     def test_sorted_set(self):
