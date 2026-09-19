@@ -2,6 +2,7 @@
 
 
 import asyncio
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum, auto
@@ -11,9 +12,9 @@ from typing import Self
 
 
 from tiny_parallel_pipeline import (
-    ResourceStatus, ResourceID, Resource, TransitionCalculation)
+    ResourceStatus, ResourceID, Resource, MilestoneTransition, TransitionCalculation)
 from tiny_parallel_pipeline.transition import NamedResources
-from tiny_parallel_pipeline.utils import trim_list
+from tiny_parallel_pipeline.utils.text_utils import trim_list
 
 
 class Scheduler:
@@ -30,84 +31,83 @@ class Scheduler:
         failure_message: str | None = None
 
         def __repr__(self) -> str:
-            return (f'deps: {self.dependency_count} status: {self.status.name} '
-                    f'msg: {self.failure_message}')
+            return f'deps: {self.dependency_count} status: {self.status.name} msg: {self.failure_message}'
 
         def __str__(self) -> str:
             return repr(self)
 
 
     def __init__(self):
-        self._id2resource: dict[ResourceID, Resource] = dict()
-        self._transition2status: dict[TransitionCalculation, Scheduler._TransitionStatus] = dict()
+        # Input fields:
+        self._id_2_target_resource: dict[ResourceID, Resource] = dict()
+        self._transition_2_status: dict[TransitionCalculation, Scheduler._TransitionStatus] = dict()
 
+        # From resource mappings
         self._resource_id_2_from_transition: dict[ResourceID, TransitionCalculation] = dict()
         self._resource_id_2_dependent_transitions: dict[ResourceID, list[TransitionCalculation]] = dict()
 
-        self._ready_to_execute_transitions = []
-
-        self._want_resource_ids = set()
-        self._want_transitions = set()
-
         self._compiled = False
 
-    def add_resources(self, *resources: Resource) -> Self:
+        # Execution state:
+        self._ready_to_execute_transitions: list[TransitionCalculation] = []
+        self._want_transitions: set[TransitionCalculation] = set()
+
+    def add_target_resource(self, *resources: Resource) -> Self:
         if self._compiled:
             raise ValueError('Frozen after compiled.')
         for r in resources:
-            self._id2resource[r.id] = r
+            self._id_2_target_resource[r.id] = r
         return self
 
     def add_transitions(self, *transitions: TransitionCalculation) -> Self:
         if self._compiled:
             raise ValueError('Frozen after compiled.')
         for t in transitions:
-            self._transition2status[t] = Scheduler._TransitionStatus()
-        return self
-
-    def pull_all_resources_from_transitions(self) -> Self:
-        if self._compiled:
-            raise ValueError('Frozen after compiled.')
-        self._id2resource.clear()
-        for t in self._transition2status.keys():
-            for r in (*t.in_resources_flat(), *t.out_resources_flat()):
-                self._id2resource[r.id] = r
+            self._transition_2_status[t] = Scheduler._TransitionStatus()
         return self
 
     def compile(self) -> tuple[bool, str | None]:
         """Builds the graph. Fails if a resource has no producer or the dependencies loop."""
+
         if self._compiled:
-            return (True, None)
+            return True, None
         self._compiled = True
 
-        for t, s in self._transition2status.items():
-            seen_resource_ids = set();
+        for t in self._transition_2_status:  # Lazy available might cut off beginning of the DAG
+            t.check_lazy_available()
+
+        #
+        # Build mapping: _resource_id_2 _from_ / _dependent_
+        #
+
+        for t, s in self._transition_2_status.items():
+            seen_resource_ids = set()
             for r in t.in_resources_flat():
-                if r.status == ResourceStatus.EMPTY:
+                if r.status != ResourceStatus.READY:
                     if r.id in seen_resource_ids:
-                        return (False, f'{repr(r)} multiple times in {repr(t)}')
-                    seen_resource_ids.add(r.id);
+                        return False, f'{r!r} multiple times in {t!r}'
+                    seen_resource_ids.add(r.id)
                     s.dependency_count += 1
-                    if r.id not in self._resource_id_2_dependent_transitions:
-                        self._resource_id_2_dependent_transitions[r.id] = []
-                    self._resource_id_2_dependent_transitions[r.id].append(t)
+                    self._resource_id_2_dependent_transitions.setdefault(r.id, []).append(t)
             for r in t.out_resources_flat():
-                if r.id in self._resource_id_2_from_transition:
-                    return (
-                        False, f'{repr(r)} out of multiple transitions {repr(t)} and ' +
-                        repr(self._resource_id_2_from_transition[r.id]))
+                if (from_t := self._resource_id_2_from_transition.get(r.id)) is not None:
+                    return False, f'{r!r} out of multiple transitions {t!r} + {from_t!r}'
                 self._resource_id_2_from_transition[r.id] = t
 
-        resource_id_2_status = dict();
-        dependency_stack = []
+        #
+        # DFS dependencies
+        #
+
+        resource_id_2_status: dict[ResourceID, str] = dict()
+        dependency_stack: list[str] = []
         def dfs(r: Resource) -> str | None:
-            if (r.status == ResourceStatus.READY or
-                    resource_id_2_status.get(r.id, '') == 'satisfied'):
+            status = resource_id_2_status.get(r.id, '')
+            if r.status == ResourceStatus.READY or status == 'satisfied':
                 return None
-            elif resource_id_2_status.get(r.id, '') == 'in_stack':
+            elif status == 'in_stack':
                 return '\n'.join(['Dependency loop'] + dependency_stack + [repr(r)])
             elif r.id not in self._resource_id_2_from_transition:
-                return f'No transition to calculate {repr(r)}.'
+                return f'No transition to calculate {r!r}.'
             dependency_stack.append(repr(r))
             resource_id_2_status[r.id] = 'in_stack'
             t = self._resource_id_2_from_transition[r.id]
@@ -122,67 +122,111 @@ class Scheduler:
             resource_id_2_status[r.id] = 'satisfied'
             return None
 
-        for r in self._id2resource.values():
-            if r.status == ResourceStatus.EMPTY:
-                self._want_resource_ids.add(r.id)
+        # prepare DFS
+        for t in self._transition_2_status:  # handle forcing Milestones
+            if isinstance(t, MilestoneTransition) and t.force_schedule:
+                self._id_2_target_resource.update({r.id: r for r in t.in_resources_flat()})
 
-        for rid in sorted(self._want_resource_ids):
-            err_msg = dfs(self._id2resource[rid])
-            if err_msg is not None:
-                return (False, err_msg)
+        # run DFS
+        for r in sorted(self._id_2_target_resource.values()):
+            if (err_msg := dfs(r)) is not None:
+                return False, err_msg
+
+        # post-process DFS
+        res_2_from_milestone = {r.id: t
+                                for t in self._transition_2_status if isinstance(t, MilestoneTransition)
+                                for r in t.out_resources_flat()}
+        res_scheduled = lambda r: self._resource_id_2_from_transition.get(r.id) in self._want_transitions
+        for t in self._transition_2_status:  # handle opportunistic Milestones
+            if isinstance(t, MilestoneTransition):
+                for r in t.in_resources_flat():
+                    if (from_m := res_2_from_milestone.get(r.id)) is not None:
+                        raise ValueError(f'Milestone {from_m!r} not supposed to make {r!r} for another milestone {t!r}')
+                if all(r.status == ResourceStatus.READY or res_scheduled(r)
+                       for r in t.in_resources_flat()):
+                    self._want_transitions.add(t)
+        for dependents in self._resource_id_2_dependent_transitions.values():  # cleanup dependents, enable GC
+            dependents[:] = [t for t in dependents if t in self._want_transitions]
+
+        #
+        # Build start-ready transitions
+        #
 
         for t in self._want_transitions:
-            s = self._transition2status[t]
+            s = self._transition_2_status[t]
             if s.dependency_count == 0:
                 self._ready_to_execute_transitions.append(t)
 
-        return (True, None)
+        return True, None
 
     def get_ready_to_execute_transitions(self) -> list[TransitionCalculation]:
         return list(self._ready_to_execute_transitions)
 
     def mark_transitions_in_progress(self, *transitions: TransitionCalculation) -> None:
         for t in transitions:
-            self._transition2status[t].status = Scheduler._TransitionStatus._Status.IN_PROGRESS
-        self._refilter_ready_to_execute_transitions()
+            self._transition_2_status[t].status = Scheduler._TransitionStatus._Status.IN_PROGRESS
+        self._ready_to_execute_transitions = [t for t in self._ready_to_execute_transitions
+            if self._transition_2_status[t].status == Scheduler._TransitionStatus._Status.UNSCHEDULED]
 
     def on_transition_succeed(self, transition: TransitionCalculation) -> None:
         """Marks the outputs ready and unlocks the transitions that waited for them."""
-        self._transition2status[transition].status = Scheduler._TransitionStatus._Status.SUCCEED
+        self._transition_2_status[transition].status = Scheduler._TransitionStatus._Status.SUCCEED
         self._want_transitions.remove(transition)
         for r in transition.out_resources_flat():
             assert r.status == ResourceStatus.READY
-            self._want_resource_ids.discard(r.id)  # may be a by-product of a wanted one
-            if r.id not in self._resource_id_2_dependent_transitions:
-                continue
-            for t in self._resource_id_2_dependent_transitions[r.id]:
-                s = self._transition2status[t]
+            for t in self._resource_id_2_dependent_transitions.get(r.id, ()):
+                s = self._transition_2_status[t]
                 assert s.status == Scheduler._TransitionStatus._Status.UNSCHEDULED
                 s.dependency_count -= 1
                 if s.dependency_count == 0 and t in self._want_transitions:
                     self._ready_to_execute_transitions.append(t)
-        self._refilter_ready_to_execute_transitions()
+        self._collect_garbage(transition)
 
-    def remaining_resources_count(self) -> int:
-        return len(self._want_resource_ids)
+    _collect_garbage_LOG_GC_PERIOD_S = 2.0
+    _collect_garbage_LOG_GC_LAST_TS = 0.0
 
-    def _refilter_ready_to_execute_transitions(self) -> None:
-        self._ready_to_execute_transitions = [t for t in self._ready_to_execute_transitions
-            if self._transition2status[t].status == Scheduler._TransitionStatus._Status.UNSCHEDULED]
+    def _collect_garbage(self, complete_transition: TransitionCalculation) -> None:
+        """GC res.data once no transition left to run still has to read it."""
+        for r in complete_transition.in_resources_flat():
+            if not r.garbage_collection_allowed or r.id in self._id_2_target_resource:
+                continue
+            deps = self._resource_id_2_dependent_transitions.get(r.id)
+            if deps is None:
+                continue
+            assert complete_transition in deps, f'{complete_transition!r} not in {deps!r}'
+            deps.remove(complete_transition)
+            if not deps:
+                r.data = f'GC-ed after {complete_transition.name}'
+                r.update_status(ResourceStatus.GARBAGE_COLLECTED)
+                if (time.monotonic() - Scheduler._collect_garbage_LOG_GC_LAST_TS
+                        >= Scheduler._collect_garbage_LOG_GC_PERIOD_S):
+                    Scheduler._collect_garbage_LOG_GC_LAST_TS = time.monotonic()
+                    print(f'[INFO] {r.id} {r.data}')
 
 
 class Executor:
-    """Runs ready transitions concurrently until every wanted resource is ready."""
-    def __init__(self, scheduler: Scheduler,
+    """Runs ready transitions concurrently until every wanted transition has run."""
+    def __init__(self, pipeline: 'Pipeline | _PipelineChain',
                  pool: multiprocessing.pool.Pool | None = None,
                  log_len: int = 100, log_period_s: float = 2.0):
-        self._scheduler = scheduler
+        self._pipeline = pipeline.as_pipeline() if hasattr(pipeline, 'as_pipeline') else pipeline
+        self._scheduler: Scheduler | None = None
         self._pool = pool
         self._log_len = log_len  # a trimmed list still has to show the ids, not just their edges
         self._log_period_s = log_period_s  # else a fast fan-out scrolls a line per completion
 
+    def compile_scheduler(self, *targets: Resource) -> Self:
+        """Compiles the pipeline for these targets and hands the Executor back, ready to run."""
+        transitions = [t.compile() for t in self._pipeline.transitions.walk_values()]
+        self._scheduler = Scheduler().add_transitions(*transitions).add_target_resource(
+            *(targets or _pull_all_target_resources_from_transitions(transitions)))
+        is_ok, err_msg = self._scheduler.compile()
+        assert is_ok, err_msg
+        return self
+
     async def run(self) -> tuple[bool, str | None]:
         """Main loop: start every ready transition, wait for the first to end, repeat."""
+        assert self._scheduler is not None, f'{self._pipeline}: compile_scheduler first'
         log_info_last_ts = 0.0
         log_info_next_pending = True
 
@@ -191,7 +235,7 @@ class Executor:
 
         pending: set[asyncio.Task] = set()
 
-        while self._scheduler.remaining_resources_count() > 0 or len(pending) > 0:
+        while len(self._scheduler._want_transitions) > 0 or len(pending) > 0:
             transition_bucket = self._scheduler.get_ready_to_execute_transitions()
             assert len(transition_bucket) > 0 or len(pending) > 0
             if transition_bucket and log_info_next_pending:
@@ -212,9 +256,10 @@ class Executor:
                 pending, return_when=asyncio.FIRST_COMPLETED)
             pending = still_pending
             done_names = _task_names(done_tasks, task2time_started)
-            ready_resources = []
+            done_transitions = []
             for task in done_tasks:
                 del task2time_started[task]
+                del task2transition[task]
                 transition, is_ok, err_msg = task.result()
                 if not is_ok:
                     for t in pending:
@@ -222,10 +267,11 @@ class Executor:
                     await asyncio.gather(*pending, return_exceptions=True)
                     return False, f'{transition.name} failed: {err_msg}'
                 self._scheduler.on_transition_succeed(transition)
-                ready_resources += [repr(r) for r in transition.out_resources_flat()]
+                done_transitions.append(transition)
 
             if log_info_next_pending := time.monotonic() - log_info_last_ts >= self._log_period_s:
                 log_info_last_ts = time.monotonic()
+                ready_resources = [repr(r) for t in done_transitions for r in t.out_resources_flat()]
                 print(f'[INFO] pending {len(pending): 5d} '
                       f'{trim_list(_task_names(pending), max_len=self._log_len)} '
                       f'-= {trim_list(done_names, max_len=self._log_len)}\n'
@@ -233,6 +279,14 @@ class Executor:
                       f'{trim_list(ready_resources, max_len=self._log_len)}')
 
         return True, None
+
+
+def _pull_all_target_resources_from_transitions(
+        transitions: list[TransitionCalculation]) -> Iterator[Resource]:
+    """Everything the transitions touch: what a caller that named no target is asking for."""
+    for t in transitions:
+        yield from t.in_resources_flat()
+        yield from t.out_resources_flat()
 
 
 def _task_names(tasks: set[asyncio.Task], task2time_started: dict[asyncio.Task, float] | None = None) -> list[str]:

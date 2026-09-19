@@ -18,6 +18,7 @@ type NamedResources = dict[str, ResourceValue]
 
 class TransitionCalculation(ABC):
     """Base class for one pipeline step. A subclass does the work in `_execute_impl`."""
+
     def __init__(self, name: str | None = None, allow_multiprocess_pool: bool = False, retries_count: int = 1):
         self._name = name
         self._allow_multiprocess_pool = allow_multiprocess_pool
@@ -34,31 +35,14 @@ class TransitionCalculation(ABC):
     def out_resources_flat(self) -> Iterator[Resource]:
         return _flatten(self._out_resources)
 
-    def terminate(self) -> None:
-        """Ask _execute_impl to bail out before it starts any further work."""
-        self._termination_requested = True
-
-    def set_name(self, name: str) -> Self:
-        self._name = name
-        return self
-
-    @property
-    def name(self) -> str | None:
-        return self._name
-
-    @property
-    def allow_multiprocess_pool(self) -> bool:
-        return self._allow_multiprocess_pool
-
     def compile(self) -> Self:
         self._compiled = True
         return self
 
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, TransitionCalculation) and id(self) == id(other)
-
-    def __hash__(self) -> int:
-        return id(self)
+    def check_lazy_available(self) -> None:
+        """Names the resources for `_check_lazy_available_impl`, as `execute` does for its own."""
+        self._check_lazy_available_impl(SimpleNamespace(**self._in_resources),
+                                        SimpleNamespace(**self._out_resources))
 
     async def execute(self) -> tuple[bool, str | None]:
         """Checks the inputs are ready, runs `_execute_impl`, then marks the outputs ready."""
@@ -87,15 +71,33 @@ class TransitionCalculation(ABC):
 
         return is_ok, err_msg
 
+    def terminate(self) -> None:
+        """Ask _execute_impl to bail out before it starts any further work."""
+        self._termination_requested = True
+
+    @property
+    def name(self) -> str | None:
+        return self._name
+
+    @property
+    def allow_multiprocess_pool(self) -> bool:
+        return self._allow_multiprocess_pool
+
     def post_execute_populate_out_resource_data(self, async_out_resources: NamedResources) -> None:
         for name, ar in async_out_resources.items():
             mr = self._out_resources[name]
-            pairs = (zip(mr, ar) if isinstance(ar, list)
+            pairs = (zip(mr, ar, strict=True) if isinstance(ar, list)
                      else ((mr[k], v) for k, v in ar.items()) if isinstance(ar, dict)
                      else ((mr, ar),))
             for m, a in pairs:
                 m.populate_data(a.data)
                 m.update_status(a.status, a.failed_reason)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, TransitionCalculation) and id(self) == id(other)
+
+    def __hash__(self) -> int:
+        return id(self)
 
     def __repr__(self) -> str:
         many = lambda r: f'[{len(r)} x {next(iter(r.values() if isinstance(r, dict) else r))!r}]'
@@ -126,10 +128,27 @@ class TransitionCalculation(ABC):
         resources.update(name_2_resource)
         return self
 
+    def _check_lazy_available_impl(self, in_resources: SimpleNamespace,
+                                   out_resources: SimpleNamespace) -> None:
+        """Override to mark what a cache holds LAZY_AVAILABLE and drop the inputs it replaces."""
+
     @abstractmethod
     async def _execute_impl(self, in_resources: SimpleNamespace,
                             out_resources: SimpleNamespace) -> tuple[bool, str | None]:
         raise NotImplementedError('transition.py TransitionCalculation @abstractmethod _execute_impl')
+
+
+class MilestoneTransition(TransitionCalculation):
+    """Marker: runs for its side effect, so it needs no out resource to be pulled into the graph.
+
+    Only a leaf: nothing can wait for it. `force_schedule` targets its inputs, so they never GC.
+
+    Naming recommendation: subclass names end with 'Milestone'.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.force_schedule: bool = False  # Otherwise scheduled IFF all its in resources are scheduled anyway.
 
 
 def _flatten(resources: NamedResources) -> Iterator[Resource]:
@@ -145,7 +164,7 @@ def _leaves(value: ResourceValue) -> Iterator[Resource]:
     elif isinstance(value, dict):
         for item in value.values():
             yield from _leaves(item)
-    elif hasattr(value, 'walk'):   # a Dir, duck-typed: a runtime import would cycle
-        yield from (leaf for _, leaf in value.walk())
+    elif hasattr(value, 'walk_path_value'):   # a Dir, duck-typed: a runtime import would cycle
+        yield from (leaf for _, leaf in value.walk_path_value())
     else:
         yield value

@@ -1,4 +1,4 @@
-.PHONY: install-ephemeral-4-py install-ephemeral-4-uv test run-ffmpeg run-semaphore clean
+.PHONY: install-ephemeral-4-py install-ephemeral-4-uv test run-ffmpeg run-semaphore run-lazy-nap clean
 
 SRC := $(CURDIR)/src
 
@@ -18,10 +18,10 @@ test:
 	PYTHONPATH=src python3 -m pytest src -v
 
 # The examples own their own knobs; command line overrides reach the sub-make on their own.
-run-ffmpeg run-semaphore:
+run-ffmpeg run-semaphore run-lazy-nap:
 	$(MAKE) -C examples $@
 
 clean:
-	d="$${TMPDIR:-/tmp}"; rm -rf $$d/gate* $$d/yt-dlp-ffmpeg-*
+	d="$${TMPDIR:-/tmp}"; rm -rf $$d/gate* $$d/yt-dlp-ffmpeg-* $$d/naps.zip
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 	rm -rf .pytest_cache

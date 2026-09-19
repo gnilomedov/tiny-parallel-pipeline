@@ -27,6 +27,10 @@ class DictDir(tpp.ResourcesDir):
         self.by_key = {'AAPL': DummyResource('D0'), 'MSFT': DummyResource('D1')}
         self.dirs = {'x': LeafDir()}
 
+class DummyDir(tpp.ResourcesDir):
+    def __init__(self):
+        self.x = DummyResource('X')
+
 class NestedDir(tpp.ResourcesDir):
     def __init__(self):
         self.seed = (DummyResource('SEED')
@@ -59,25 +63,28 @@ def transitions(resources):
 #
 
 class TestDir:
-    def test_walk(self, resources):
-        assert [p for p, _ in LeafDir().walk()] == ['a', 'b']
-        assert [p for p, _ in resources.walk()] == ['seed', 'leaf.a', 'leaf.b']
-        assert [p for p, _ in resources.walk('top.')] == [
+    def test_walk_path_value(self, resources):
+        assert [p for p, _ in LeafDir().walk_path_value()] == ['a', 'b']
+        assert [p for p, _ in resources.walk_path_value()] == ['seed', 'leaf.a', 'leaf.b']
+        assert [p for p, _ in resources.walk_path_value('top.')] == [
             'top.seed', 'top.leaf.a', 'top.leaf.b']
-        assert dict(resources.walk())['leaf.a'] is resources.leaf.a
-        assert [p for p, _ in ListDir().walk()] == [
+        assert dict(resources.walk_path_value())['leaf.a'] is resources.leaf.a
+        assert [p for p, _ in ListDir().walk_path_value()] == [
             'items[0]', 'items[1]', 'dirs[0].a', 'dirs[0].b', 'dirs[1].a', 'dirs[1].b']
 
-    def test_walk_dict(self):
+    def test_walk_path_value_of_dicts(self):
         d = DictDir()
-        assert [p for p, _ in d.walk()] == [
+        assert [p for p, _ in d.walk_path_value()] == [
             "by_key['AAPL']", "by_key['MSFT']", "dirs['x'].a", "dirs['x'].b"]
-        assert dict(d.walk())["by_key['MSFT']"] is d.by_key['MSFT']
+        assert dict(d.walk_path_value())["by_key['MSFT']"] is d.by_key['MSFT']
 
         class MixedDir(tpp.ResourcesDir):
             def __init__(self):
                 self.mix = {'k': [LeafDir()]}
-        assert [p for p, _ in MixedDir().walk()] == ["mix['k'][0].a", "mix['k'][0].b"]
+        assert [p for p, _ in MixedDir().walk_path_value()] == ["mix['k'][0].a", "mix['k'][0].b"]
+
+    def test_walk_values_drops_the_paths(self, resources):
+        assert resources.walk_values() == [resources.seed, resources.leaf.a, resources.leaf.b]
 
     def test_assert_contract_ok(self, resources):
         class OuterDir(tpp.ResourcesDir):
@@ -115,24 +122,24 @@ class TestDir:
                            match=r"BadDictDir\.oops\['bad'\] is str, want Resource or Dir"):
             BadDictDir().assert_contract(tpp.Resource)
 
-    def test_all_in_declaration_order(self, transitions):
-        assert [t.name for t in transitions.all()] == ['T1', 'T2']
+    def test_walk_values_in_declaration_order(self, transitions):
+        assert [t.name for t in transitions.walk_values()] == ['T1', 'T2']
 
-    def test_all_flattens_lists(self, resources):
+    def test_walk_values_flattens_lists(self, resources):
         class Transitions(tpp.TransitionsDir):
             def __init__(self):
                 self.many = [
                     DummyTransitionCalculation('T1', {}, {'a': resources.leaf.a}),
                     DummyTransitionCalculation('T2', {}, {'b': resources.leaf.b})]
-        assert [t.name for t in Transitions().all()] == ['T1', 'T2']
+        assert [t.name for t in Transitions().walk_values()] == ['T1', 'T2']
 
-    def test_all_flattens_dicts(self, resources):
+    def test_walk_values_flattens_dicts(self, resources):
         class Transitions(tpp.TransitionsDir):
             def __init__(self):
                 self.many = {
                     'a': DummyTransitionCalculation('T1', {}, {'a': resources.leaf.a}),
                     'b': DummyTransitionCalculation('T2', {}, {'b': resources.leaf.b})}
-        assert [t.name for t in Transitions().all()] == ['T1', 'T2']
+        assert [t.name for t in Transitions().walk_values()] == ['T1', 'T2']
 
 
 class TestPipeline:
@@ -140,7 +147,7 @@ class TestPipeline:
         seen = []
         monkeypatch.setattr(tpp.Dir, 'assert_contract',
                             lambda self, leaf: seen.append((type(self).__name__, leaf)))
-        tpp.Pipeline(resources, transitions)
+        tpp.Pipeline('one', resources, transitions)
         assert seen == [('NestedDir', tpp.Resource), ('Transitions', tpp.TransitionCalculation)]
 
     def test_init_rejects_broken_contracts(self, resources, transitions):
@@ -152,21 +159,37 @@ class TestPipeline:
                 self.oops = 'not a transition'
         with pytest.raises(AssertionError,
                            match='BadResourcesDir.oops is str, want Resource or Dir'):
-            tpp.Pipeline(BadResourcesDir(), transitions)
+            tpp.Pipeline('one', BadResourcesDir(), transitions)
         with pytest.raises(AssertionError,
                            match='BadTransitionsDir.oops is str, want TransitionCalculation'):
-            tpp.Pipeline(resources, BadTransitionsDir())
+            tpp.Pipeline('one', resources, BadTransitionsDir())
 
-    def test_scheduler(self, resources, transitions):
-        scheduler = tpp.Pipeline(resources, transitions).scheduler()
-        assert all(t._compiled for t in transitions.all())
-        assert scheduler.remaining_resources_count() == 2
-        assert [t.name for t in scheduler.get_ready_to_execute_transitions()] == ['T1']
+    def test_compile_scheduler(self, resources, transitions):
+        executor = tpp.Executor(tpp.Pipeline('one', resources, transitions)).compile_scheduler()
+        assert all(t._compiled for t in transitions.walk_values())
+        assert len(executor._scheduler._want_transitions) == 2
+        assert [t.name for t in executor._scheduler.get_ready_to_execute_transitions()] == ['T1']
 
-    def test_scheduler_asserts_compile_failure(self, resources):
+    def test_compile_scheduler_asserts_compile_failure(self, resources):
         class Transitions(tpp.TransitionsDir):
             def __init__(self):
                 self.only = DummyTransitionCalculation(  # leaf.b has no producer
                     'T1', {'b': resources.leaf.b}, {'a': resources.leaf.a})
         with pytest.raises(AssertionError, match='No transition to calculate'):
-            tpp.Pipeline(resources, Transitions()).scheduler()
+            tpp.Executor(tpp.Pipeline('one', resources, Transitions())).compile_scheduler()
+
+
+def test_pipeline_chain(resources, transitions):
+    first = tpp.Pipeline('first', resources, transitions)
+    second = tpp.Pipeline('second', DummyDir(), tpp.TransitionsDir())
+
+    merged = (first | second).as_pipeline()
+
+    assert list(vars(merged.resources)) == ['first', 'second']
+    assert [path for path, _ in merged.resources.walk_path_value()] == [
+        'first.seed', 'first.leaf.a', 'first.leaf.b', 'second.x']
+    assert [t.name for t in merged.transitions.walk_values()] == ['T1', 'T2']
+
+    # One name is one stage, and stages connect by sharing an object, never by sharing an id.
+    with pytest.raises(ValueError, match='two stages named first'):
+        (first | tpp.Pipeline('first', DummyDir(), tpp.TransitionsDir())).as_pipeline()

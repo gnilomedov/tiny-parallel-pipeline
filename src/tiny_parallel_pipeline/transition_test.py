@@ -163,7 +163,7 @@ class TestListValuedResources:
         return DummyResource(name).populate_data(f'd={name}').update_status(
             tpp.ResourceStatus.READY)
 
-    def test_flatten_expands_every_container_and_passes_singles_through(self):
+    def test_flatten(self):
         a, b, c = DummyResource('A'), DummyResource('B'), DummyResource('C')
 
         assert list(tpp.transition._flatten(
@@ -191,7 +191,7 @@ class TestListValuedResources:
 
         assert [r.data for r in outs] == ['from-worker-0', 'from-worker-1']
 
-    def test_leaves_reaches_through_every_nesting_of_list_dict_and_dir(self):
+    def test_leaves(self):
         a, b, c, d = (DummyResource(k) for k in 'ABCD')
         one_dir = DirOfResources(x=b, y=c)
         leaves = lambda v: list(tpp.transition._leaves(v))

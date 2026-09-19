@@ -147,16 +147,14 @@ class WaitAtGateTransition(tpp.TransitionCalculation):
         return True, None
 
 
-class GatherResponsesTransition(tpp.TransitionCalculation):
-    """Every worker's line joined into one resource: the whole list is a single input."""
-    def __init__(self, name, in_results: list[tpp.Resource], out_all_responses: tpp.Resource):
+class GatherResponsesMilestone(tpp.MilestoneTransition):
+    """Counts the lines and makes nothing: the whole list of results is a single input."""
+    def __init__(self, name, in_results: list[tpp.Resource]):
         super().__init__(name)
         self._set_in_resources(results=in_results)
-        self._set_out_resources(all_responses=out_all_responses)
 
     @override
     async def _execute_impl(self, in_resources, out_resources):
-        out_resources.all_responses.populate_data('\n'.join(r.data for r in in_resources.results))
         print(f'[INFO] gathered {len(in_resources.results)} responses')  # main prints each
         return True, None
 
@@ -167,9 +165,7 @@ class ConcurrentGatePipeline(tpp.Pipeline):
             self.cpp = tpp.FileResource('gate-cpp', os.path.join(args.gate_dir, 'gate.cpp'))
             self.so = tpp.FileResource('gate-so', os.path.join(
                 args.gate_dir, f'gate{sysconfig.get_config_var("EXT_SUFFIX")}'))
-            self.results = [tpp.TxtResource(f'gate-result-{_worker_name(i)}')
-                            for i in range(args.workers)]
-            self.all_responses = tpp.TxtResource('all-responses')
+            self.results = [tpp.TxtResource(f'gate-result-{_worker_name(i)}') for i in range(args.workers)]
 
     class Transitions(tpp.TransitionsDir):
         def __init__(self, args: argparse.Namespace, res: 'ConcurrentGatePipeline.Resources'):
@@ -177,11 +173,12 @@ class ConcurrentGatePipeline(tpp.Pipeline):
             self.build = CompileCppTransition('gate-build', False, res.cpp, res.so)
             self.wait = [WaitAtGateTransition(f'gate-wait-{_worker_name(i)}', _worker_name(i), args, res.so, r)
                          for i, r in enumerate(res.results)]
-            self.gather = GatherResponsesTransition('gate-gather', res.results, res.all_responses)
+            self.gather = GatherResponsesMilestone('gate-gather', res.results)
 
     def __init__(self, args: argparse.Namespace):
         resources = ConcurrentGatePipeline.Resources(args)
         super().__init__(
+            'concurrent_gate',
             resources=resources,
             transitions=ConcurrentGatePipeline.Transitions(args, resources))
 
@@ -230,7 +227,7 @@ def main():
 
     pipeline = ConcurrentGatePipeline(args)
     started = time.monotonic()
-    is_ok, err_msg = asyncio.run(tpp.Executor(pipeline.scheduler(pipeline.resources.all_responses)).run())
+    is_ok, err_msg = asyncio.run(tpp.Executor(pipeline).compile_scheduler(*pipeline.resources.results).run())
     took = time.monotonic() - started
 
     for r in pipeline.resources.results:

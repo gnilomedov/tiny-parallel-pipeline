@@ -189,6 +189,7 @@ class YtDlpFfmpegPipeline(tpp.Pipeline):
     def __init__(self, args: argparse.Namespace):
         resources = YtDlpFfmpegPipeline.Resources(args)
         super().__init__(
+            'yt_dlp_ffmpeg',
             resources=resources,
             transitions=YtDlpFfmpegPipeline.Transitions(resources))
 
@@ -243,9 +244,9 @@ def main():
     target = pipeline.resources.mp3_file
     if args.pool_workers:
         with multiprocessing.Pool(args.pool_workers) as pool:
-            is_ok, err_msg = asyncio.run(tpp.Executor(pipeline.scheduler(target), pool).run())
+            is_ok, err_msg = asyncio.run(tpp.Executor(pipeline, pool).compile_scheduler(target).run())
     else:
-        is_ok, err_msg = asyncio.run(tpp.Executor(pipeline.scheduler(target)).run())
+        is_ok, err_msg = asyncio.run(tpp.Executor(pipeline).compile_scheduler(target).run())
 
     print(target.data)
     subprocess.run(['ls', '-lht', '--color=always', args.out_dir], stdout=sys.stderr)

@@ -9,10 +9,13 @@ from typing import Any, Self
 
 
 class ResourceStatus(Enum):
-    """Where a resource is in its life: EMPTY, IN_PROGRESS, READY or FAILED."""
+    """Where a resource is in its life."""
     EMPTY = auto()
+    # Cached somewhere its transition can load it cheaply: still has to run, but reads nothing.
+    LAZY_AVAILABLE = auto()
     IN_PROGRESS = auto()
     READY = auto()
+    GARBAGE_COLLECTED = auto()
     FAILED = auto()
 
 
@@ -53,6 +56,7 @@ class Resource(ABC):
     status: ResourceStatus = ResourceStatus.EMPTY
     failed_reason: str | None = None
     data: Any = None
+    garbage_collection_allowed: bool = True
 
     def __post_init__(self, in_class_id: str) -> None:
         object.__setattr__(self, 'id', ResourceID(type(self), in_class_id))
