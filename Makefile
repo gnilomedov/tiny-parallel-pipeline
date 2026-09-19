@@ -4,8 +4,14 @@ SRC := $(CURDIR)/src
 
 # The interpreter's stdlib dir is the only one every uv env inherits (not site-packages,
 # and user-site is off in venvs). Ephemeral: pins one build, so a patch upgrade drops it.
+PYTHON := $(shell \
+	command -v python 2>/dev/null || \
+	command -v python3 2>/dev/null || \
+	command -v python3.12 2>/dev/null \
+)
 install-ephemeral-4-py:
-	@stdlib=$$(python -c 'import os; print(os.path.dirname(os.__file__))'); \
+	@test -n "$(PYTHON)" || { echo "No Python interpreter found"; exit 1; }
+	@stdlib=$$($(PYTHON) -c 'import os; print(os.path.dirname(os.__file__))'); \
 	ln -sfn $(SRC)/tiny_parallel_pipeline $$stdlib/tiny_parallel_pipeline; \
 	ls -l $$stdlib/tiny_parallel_pipeline
 install-ephemeral-4-uv:
