@@ -62,7 +62,7 @@ class TestScheduler:
     def test_compile_ok_ready(self):
         r1 = DummyResource('A').update_status(tpp.ResourceStatus.READY)
         r2 = DummyResource('B')
-        t = DummyTransitionCalculation('T1', {'a': r1}, {'b': r2})
+        t = DummyTransitionCalculation('T1', dict(a=r1), dict(b=r2))
 
         scheduler = tpp.Scheduler().add_target_resource(r1, r2).add_transitions(t)
 
@@ -73,7 +73,7 @@ class TestScheduler:
 
     def test_nothing_can_be_added_after_compile(self):
         scheduler = tpp.Scheduler().add_transitions(
-            DummyTransitionCalculation('T1', {}, {'a': DummyResource('A')}))
+            DummyTransitionCalculation('T1', {}, dict(a=DummyResource('A'))))
         assert scheduler.compile() == (True, None)
 
         with pytest.raises(ValueError, match='Frozen after compiled.'):
@@ -82,7 +82,7 @@ class TestScheduler:
     def test_compile_ok_input_less(self):
         r1 = DummyResource('A')
         r2 = DummyResource('B')
-        t = DummyTransitionCalculation('T1', {}, {'a': r1, 'b': r2})
+        t = DummyTransitionCalculation('T1', {}, dict(a=r1, b=r2))
 
         scheduler = _scheduler_wanting_everything(t)
 
@@ -93,7 +93,7 @@ class TestScheduler:
         r1 = DummyResource('A')
         r2 = DummyResource('B')
         scheduler = tpp.Scheduler().add_target_resource(r1, r2).add_transitions(
-            DummyTransitionCalculation('T1', {'a': r1}, {'b': r2}))
+            DummyTransitionCalculation('T1', dict(a=r1), dict(b=r2)))
 
         is_ok, err_msg = scheduler.compile()
         assert not is_ok
@@ -102,8 +102,8 @@ class TestScheduler:
     def test_compile_loop(self):
         r1 = DummyResource('A')
         r2 = DummyResource('B')
-        t1 = DummyTransitionCalculation('T1', {'a': r1}, {'b': r2})
-        t2 = DummyTransitionCalculation('T2', {'b': r2}, {'a': r1})
+        t1 = DummyTransitionCalculation('T1', dict(a=r1), dict(b=r2))
+        t2 = DummyTransitionCalculation('T2', dict(b=r2), dict(a=r1))
 
         scheduler = _scheduler_wanting_everything(t1, t2)
 
@@ -121,7 +121,7 @@ class TestScheduler:
 
     def test_compile_rejects_duplicate_wiring(self):
         dup = DummyResource('A')
-        t = DummyTransitionCalculation('T1', {'x': dup, 'y': dup}, {'b': DummyResource('B')})
+        t = DummyTransitionCalculation('T1', dict(x=dup, y=dup), dict(b=DummyResource('B')))
         scheduler = _scheduler_wanting_everything(t)
         is_ok, err_msg = scheduler.compile()
         assert not is_ok and 'multiple times in' in err_msg
@@ -129,8 +129,8 @@ class TestScheduler:
         seed = DummyResource('A').update_status(tpp.ResourceStatus.READY)
         out = DummyResource('B')
         scheduler = _scheduler_wanting_everything(
-                DummyTransitionCalculation('T1', {'a': seed}, {'b': out}),
-                DummyTransitionCalculation('T2', {'a': seed}, {'b': out}))
+                DummyTransitionCalculation('T1', dict(a=seed), dict(b=out)),
+                DummyTransitionCalculation('T2', dict(a=seed), dict(b=out)))
         is_ok, err_msg = scheduler.compile()
         # Both claimants named, so the message points at the clash and not at the whole map.
         assert not is_ok and 'out of multiple transitions' in err_msg
@@ -141,8 +141,8 @@ class TestScheduler:
         r2 = DummyResource('B')
         r3 = DummyResource('C')
 
-        t12 = DummyTransitionCalculation('T12', {'a': r1}, {'b': r2})
-        t23 = DummyTransitionCalculation('T23', {}, {'c': r3})
+        t12 = DummyTransitionCalculation('T12', dict(a=r1), dict(b=r2))
+        t23 = DummyTransitionCalculation('T23', {}, dict(c=r3))
         scheduler = _scheduler_wanting_everything(t12, t23)
         is_ok, err_msg = scheduler.compile()
         assert is_ok, err_msg
@@ -157,8 +157,8 @@ class TestScheduler:
         r3 = DummyResource('C')
 
         scheduler = _scheduler_wanting_everything(
-                DummyTransitionCalculation('T12', {'a': r1}, {'b': r2}),
-                DummyTransitionCalculation('T23', {'b': r2}, {'c': r3}))
+                DummyTransitionCalculation('T12', dict(a=r1), dict(b=r2)),
+                DummyTransitionCalculation('T23', dict(b=r2), dict(c=r3)))
         is_ok, err_msg = scheduler.compile()
         assert is_ok, err_msg
         assert len(scheduler._want_transitions) == 2
@@ -186,9 +186,9 @@ class TestScheduler:
 def test_check_lazy_available():
     seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
     mid, out = DummyResource('MID'), DummyResource('OUT')
-    feeder = DummyTransitionCalculation('T-feeder', {'seed': seed}, {'mid': mid})
+    feeder = DummyTransitionCalculation('T-feeder', dict(seed=seed), dict(mid=mid))
     feeder._execute_impl = mock.AsyncMock()
-    executor = _executor(feeder, LazyTransitionCalculation('T-cached', {'mid': mid}, {'out': out}), targets=[out])
+    executor = _executor(feeder, LazyTransitionCalculation('T-cached', dict(mid=mid), dict(out=out)), targets=[out])
 
     assert asyncio.run(executor.run()) == (True, None)
 
@@ -201,9 +201,9 @@ def test_an_input_is_collected_once_every_reader_has_run():
     seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
     mid, left, right = (DummyResource(k) for k in ('MID', 'LEFT', 'RIGHT'))
     executor = _executor(
-        DummyTransitionCalculation('T-mid', {'seed': seed}, {'mid': mid}),
-        DummyTransitionCalculation('T-left', {'mid': mid}, {'left': left}),
-        DummyTransitionCalculation('T-right', {'mid': mid, 'left': left}, {'right': right}),
+        DummyTransitionCalculation('T-mid', dict(seed=seed), dict(mid=mid)),
+        DummyTransitionCalculation('T-left', dict(mid=mid), dict(left=left)),
+        DummyTransitionCalculation('T-right', dict(mid=mid, left=left), dict(right=right)),
         targets=[left, right])
 
     assert asyncio.run(executor.run()) == (True, None)
@@ -223,10 +223,10 @@ def test_what_keeps_a_resource_from_being_collected():
     kept = DummyResource('KEPT', garbage_collection_allowed=False)
     shared, out, unread = (DummyResource(k) for k in ('SHARED', 'OUT', 'UNREAD'))
     executor = _executor(
-        DummyTransitionCalculation('T-kept', {'seed': seed}, {'kept': kept}),
-        DummyTransitionCalculation('T-shared', {'seed': seed}, {'shared': shared}),
-        DummyTransitionCalculation('T-out', {'kept': kept, 'shared': shared}, {'out': out}),
-        DummyTransitionCalculation('T-unread', {'shared': shared}, {'unread': unread}),
+        DummyTransitionCalculation('T-kept', dict(seed=seed), dict(kept=kept)),
+        DummyTransitionCalculation('T-shared', dict(seed=seed), dict(shared=shared)),
+        DummyTransitionCalculation('T-out', dict(kept=kept, shared=shared), dict(out=out)),
+        DummyTransitionCalculation('T-unread', dict(shared=shared), dict(unread=unread)),
         targets=[out])
 
     assert asyncio.run(executor.run()) == (True, None)
@@ -241,12 +241,12 @@ def test_what_keeps_a_resource_from_being_collected():
 def test_a_milestone_runs_on_inputs_that_are_wanted_anyway():
     seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
     mid, out = DummyResource('MID'), DummyResource('OUT')
-    reader = DummyMilestone('M-reader', {'seed': seed, 'mid': mid})
+    reader = DummyMilestone('M-reader', dict(seed=seed, mid=mid))
     empty = DummyMilestone('M-empty')
-    final = DummyMilestone('M-final', {'out': out})
+    final = DummyMilestone('M-final', dict(out=out))
     executor = _executor(
-        DummyTransitionCalculation('T-mid', {'seed': seed}, {'mid': mid}),
-        DummyTransitionCalculation('T-out', {'mid': mid}, {'out': out}),
+        DummyTransitionCalculation('T-mid', dict(seed=seed), dict(mid=mid)),
+        DummyTransitionCalculation('T-out', dict(mid=mid), dict(out=out)),
         reader, empty, final, targets=[out])
 
     assert asyncio.run(executor.run()) == (True, None)
@@ -264,10 +264,10 @@ def test_a_milestone_runs_on_inputs_that_are_wanted_anyway():
 def test_a_milestone_stays_out_when_an_input_is_not_wanted():
     seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
     aside, out = DummyResource('ASIDE'), DummyResource('OUT')
-    milestone = DummyMilestone('M-aside', {'aside': aside})
+    milestone = DummyMilestone('M-aside', dict(aside=aside))
     executor = _executor(
-        DummyTransitionCalculation('T-out', {'seed': seed}, {'out': out}),
-        DummyTransitionCalculation('T-aside', {'seed': seed}, {'aside': aside}),
+        DummyTransitionCalculation('T-out', dict(seed=seed), dict(out=out)),
+        DummyTransitionCalculation('T-aside', dict(seed=seed), dict(aside=aside)),
         milestone, targets=[out])
 
     assert asyncio.run(executor.run()) == (True, None)
@@ -281,9 +281,9 @@ def test_a_milestone_may_not_feed_another_one():
     seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
     passed_on, out = DummyResource('PASSED_ON'), DummyResource('OUT')
     scheduler = tpp.Scheduler().add_transitions(
-        DummyTransitionCalculation('T-out', {'seed': seed}, {'out': out}),
-        DummyMilestone('M-reader', {'passed_on': passed_on}),
-        MakerMilestone('M-maker', {'seed': seed}, {'passed_on': passed_on})
+        DummyTransitionCalculation('T-out', dict(seed=seed), dict(out=out)),
+        DummyMilestone('M-reader', dict(passed_on=passed_on)),
+        MakerMilestone('M-maker', dict(seed=seed), dict(passed_on=passed_on))
     ).add_target_resource(out)
 
     # Whether the reader is wanted would otherwise depend on the order the two were added.
@@ -294,10 +294,10 @@ def test_a_milestone_may_not_feed_another_one():
 def test_a_forced_milestone_pulls_in_the_branch_it_reads():
     seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
     aside, out = DummyResource('ASIDE'), DummyResource('OUT')
-    milestone = ForcedMilestone('M-aside', {'aside': aside})
+    milestone = ForcedMilestone('M-aside', dict(aside=aside))
     executor = _executor(
-        DummyTransitionCalculation('T-out', {'seed': seed}, {'out': out}),
-        DummyTransitionCalculation('T-aside', {'seed': seed}, {'aside': aside}),
+        DummyTransitionCalculation('T-out', dict(seed=seed), dict(out=out)),
+        DummyTransitionCalculation('T-aside', dict(seed=seed), dict(aside=aside)),
         milestone, targets=[out])
 
     assert asyncio.run(executor.run()) == (True, None)
@@ -312,8 +312,8 @@ def test_a_forced_milestone_fails_compile_on_an_input_nobody_makes():
     seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
     orphan, out = DummyResource('ORPHAN'), DummyResource('OUT')
     scheduler = tpp.Scheduler().add_transitions(
-        DummyTransitionCalculation('T-out', {'seed': seed}, {'out': out}),
-        ForcedMilestone('M-orphan', {'orphan': orphan})
+        DummyTransitionCalculation('T-out', dict(seed=seed), dict(out=out)),
+        ForcedMilestone('M-orphan', dict(orphan=orphan))
     ).add_target_resource(out)
 
     # Unforced the branch would just be left out; forcing asks for a resource that has no maker.
@@ -334,9 +334,9 @@ class TestExecutor:
         r4 = DummyResource('D')
         r5 = DummyResource('E')
 
-        t1 = DummyTransitionCalculation('T13', {'a': r1}, {'c': r3})
-        t2 = DummyTransitionCalculation('T24', {'b': r2}, {'d': r4})
-        t3 = DummyTransitionCalculation('T145', {'a': r1, 'd': r4}, {'e': r5})
+        t1 = DummyTransitionCalculation('T13', dict(a=r1), dict(c=r3))
+        t2 = DummyTransitionCalculation('T24', dict(b=r2), dict(d=r4))
+        t3 = DummyTransitionCalculation('T145', dict(a=r1, d=r4), dict(e=r5))
 
         asyncio.run(_executor(t1, t2, t3).run())
 
@@ -354,7 +354,7 @@ class TestExecutor:
         seed = DummyResource('SEED').populate_data('d').update_status(tpp.ResourceStatus.READY)
         bad_out, slow_out = DummyResource('BAD'), DummyResource('SLOW')
         bad = FlakyTransitionCalculation('Bad', bad_out, fail_times=9, retries_count=1)
-        slow = DummyTransitionCalculation('Slow', {'seed': seed}, {'slow': slow_out},
+        slow = DummyTransitionCalculation('Slow', dict(seed=seed), dict(slow=slow_out),
                                           simulate_async_sleep_period=0.05)
 
         assert asyncio.run(_executor(bad, slow).run()) == (False, 'Bad failed: boom 1')
@@ -367,12 +367,12 @@ class TestExecutor:
                      for i in range(10)]
         resources[0].populate_data(f'd0').update_status(tpp.ResourceStatus.READY)
         transitions = [DummyTransitionCalculation(
-            f'T1', {'seed': resources[0]}, {'made': resources[1]},
+            f'T1', dict(seed=resources[0]), dict(made=resources[1]),
             data_add_pid=True, allow_multiprocess_pool=True)]
         transitions += [
             DummyTransitionCalculation(
-                    f'T{i}', {'seed': resources[0], 'made': resources[1]},
-                    {'made': resources[i]},
+                    f'T{i}', dict(seed=resources[0], made=resources[1]),
+                    dict(made=resources[i]),
                     data_add_pid=True, allow_multiprocess_pool=True)
                 for i in range(2, len(resources))
         ]

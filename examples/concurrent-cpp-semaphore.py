@@ -89,61 +89,57 @@ PYBIND11_MODULE(gate, m) {
 '''
 
 
-class CompileCppTransition(tpp.TransitionCalculation):
-    """Compiles the `cpp_file` input into the `so_file` output, skipping when the .so is newer."""
-    def __init__(self, name, allow_multiprocess_pool,
-                 in_cpp_file: tpp.Resource, out_so_file: tpp.Resource):
-        super().__init__(name, allow_multiprocess_pool=allow_multiprocess_pool)
-        self._set_in_resources(cpp_file=in_cpp_file)
-        self._set_out_resources(so_file=out_so_file)
+@tpp.stateless_transition
+async def compile_cpp(in_resources, out_resources) -> tuple[bool, str | None]:
+    """Compiles the `cpp_file` input into the `so_file` output, skipping when the .so is newer.
 
-    @override
-    async def _execute_impl(self, in_resources, out_resources):
-        cpp_path = in_resources.cpp_file.data
-        so_path = out_resources.so_file.expect_ready_file_at
-        if os.path.exists(so_path) and os.path.getmtime(so_path) > os.path.getmtime(cpp_path):
-            print(f'[INFO] compile skipped, {so_path} is newer than the .cpp')
-        else:
-            if os.path.exists(so_path):
-                os.remove(so_path)
-            import pybind11
-            print(f'[INFO] compiling {cpp_path}')
-            is_ok, err_msg = await tpp.run_shell(
-                f'c++ -O2 -Wall -shared -std=c++23 -fPIC '
-                f'-I{pybind11.get_include()} -I{sysconfig.get_paths()["include"]} '
-                f'"{cpp_path}" -o "{so_path}"')
-            if not is_ok:
-                return False, err_msg
-            print(f'[INFO] compiled {so_path}')
-        out_resources.so_file.populate_data(so_path).update_status(tpp.ResourceStatus.READY)
-        return True, None
+    Args:
+      in_resources.cpp_file: tpp.FileResource
+      out_resources.so_file: tpp.FileResource
+    """
+    cpp_path = in_resources.cpp_file.data
+    so_path = out_resources.so_file.expect_ready_file_at
+    if os.path.exists(so_path) and os.path.getmtime(so_path) > os.path.getmtime(cpp_path):
+        print(f'[INFO] compile skipped, {so_path} is newer than the .cpp')
+    else:
+        if os.path.exists(so_path):
+            os.remove(so_path)
+        import pybind11
+        print(f'[INFO] compiling {cpp_path}')
+        is_ok, err_msg = await tpp.run_shell(
+            f'c++ -O2 -Wall -shared -std=c++23 -fPIC '
+            f'-I{pybind11.get_include()} -I{sysconfig.get_paths()["include"]} '
+            f'"{cpp_path}" -o "{so_path}"')
+        if not is_ok:
+            return False, err_msg
+        print(f'[INFO] compiled {so_path}')
+    out_resources.so_file.populate_data(so_path).update_status(tpp.ResourceStatus.READY)
+    return True, None
 
 
-class WaitAtGateTransition(tpp.TransitionCalculation):
+class WaitAtGateTransition(tpp.TypedTransition):
     """Sleeps, then sends one worker into the C++ gate the way `--strategy` asks for."""
-    def __init__(self, name, worker_name, args: argparse.Namespace,
-                 in_so_file: tpp.Resource, out_result_txt: tpp.Resource):
-        super().__init__(name)
-        self._set_in_resources(so_file=in_so_file)
-        self._set_out_resources(result_txt=out_result_txt)
-        self._worker_name = worker_name
-        self._args = args
+
+    worker_name: str
+    args: argparse.Namespace
+    in_so_file: tpp.Resource
+    out_result_txt: tpp.Resource
 
     @override
     async def _execute_impl(self, in_resources, out_resources):
-        if self._args.gate_dir not in sys.path:  # .so built by the gate-build transition
-            sys.path.insert(0, self._args.gate_dir)
+        if self.args.gate_dir not in sys.path:  # .so built by the gate-build transition
+            sys.path.insert(0, self.args.gate_dir)
         import gate
-        await asyncio.sleep(random.Random(f'239-{self._worker_name}').random())
+        await asyncio.sleep(random.Random(f'239-{self.worker_name}').random())
         # C++ releases the GIL, so a worker on a thread lets the others reach the gate too.
-        if self._args.strategy == 'run-in-executor':  # our own pool, exactly --pool-size threads
+        if self.args.strategy == 'run-in-executor':  # our own pool, exactly --pool-size threads
             total_ms = await asyncio.get_running_loop().run_in_executor(
-                _shared_executor(self._args.pool_size),
-                functools.partial(gate.wait_at_gate, self._worker_name))
+                _shared_executor(self.args.pool_size),
+                functools.partial(gate.wait_at_gate, self.worker_name))
         else:  # to-thread: the loop's shared pool, min(32, cpu + 4) threads
-            total_ms = await asyncio.to_thread(gate.wait_at_gate, self._worker_name)
+            total_ms = await asyncio.to_thread(gate.wait_at_gate, self.worker_name)
         out_resources.result_txt.populate_data(
-            f'{self._worker_name} passed the gate in {total_ms}ms')
+            f'{self.worker_name} passed the gate in {total_ms}ms')
         return True, None
 
 
@@ -170,8 +166,10 @@ class ConcurrentGatePipeline(tpp.Pipeline):
     class Transitions(tpp.TransitionsDir):
         def __init__(self, args: argparse.Namespace, res: 'ConcurrentGatePipeline.Resources'):
             self.write = tpp.WriteTextFileTransition('gate-write', _GATE_CPP, False, res.cpp)
-            self.build = CompileCppTransition('gate-build', False, res.cpp, res.so)
-            self.wait = [WaitAtGateTransition(f'gate-wait-{_worker_name(i)}', _worker_name(i), args, res.so, r)
+            self.build = compile_cpp('gate-build', in_cpp_file=res.cpp, out_so_file=res.so)
+            self.wait = [WaitAtGateTransition(f'gate-wait-{_worker_name(i)}', worker_name=_worker_name(i), args=args,
+                                              in_so_file=res.so,
+                                              out_result_txt=r)
                          for i, r in enumerate(res.results)]
             self.gather = GatherResponsesMilestone('gate-gather', res.results)
 

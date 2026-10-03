@@ -1,6 +1,9 @@
 import asyncio
 import os
+import pickle
 from typing import override
+
+import pytest
 
 
 import tiny_parallel_pipeline as tpp
@@ -41,7 +44,7 @@ class DummyTransitionCalculation(tpp.TransitionCalculation):
 class TwoStepTransitionCalculation(DummyTransitionCalculation):
     """Names its inputs in two calls, pinning that `_set_in_resources` adds, not replaces."""
     def __init__(self, name, first, second, only):
-        super().__init__(name, {'first': first}, {'only': only})
+        super().__init__(name, dict(first=first), dict(only=only))
         self._set_in_resources(second=second)
 
 
@@ -114,7 +117,7 @@ class TestDummyTransitionCalculation:
         r2 = DummyResource('IN=1').populate_data('d=222').update_status(tpp.ResourceStatus.READY)
         r3 = DummyResource('OUT=0')
         t = DummyTransitionCalculation(
-            'Dummy-A', {'in0': r1, 'in1': r2}, {'out0': r3}).compile()
+            'Dummy-A', dict(in0=r1, in1=r2), dict(out0=r3)).compile()
         assert str(t) == (
             '<DummyTransitionCalculation Dummy-A : '
             '{in0: <DummyResource id=DummyResource:IN=0 status=READY data=set>,'
@@ -210,7 +213,7 @@ class TestListValuedResources:
 
     def test_pool_results_are_copied_back_by_key(self):
         outs = {'p': DummyResource('OUT=P'), 'q': DummyResource('OUT=Q')}
-        t = DummyTransitionCalculation('Dict', {}, {'many': outs})
+        t = DummyTransitionCalculation('Dict', {}, dict(many=outs))
         theirs = {k: DummyResource(f'OUT={k}').populate_data(f'from-worker-{k}').update_status(
             tpp.ResourceStatus.READY) for k in ('p', 'q')}
 
@@ -222,8 +225,111 @@ class TestListValuedResources:
     def test_repr_summarises_a_container_rather_than_listing_it(self):
         a, b = DummyResource('A'), DummyResource('B')
 
-        as_list = repr(DummyTransitionCalculation('L', {'many': [a, b]}, {}))
-        as_dict = repr(DummyTransitionCalculation('D', {'many': {'a': a, 'b': b}}, {}))
+        as_list = repr(DummyTransitionCalculation('L', dict(many=[a, b]), {}))
+        as_dict = repr(DummyTransitionCalculation('D', dict(many={'a': a, 'b': b}), {}))
 
         assert 'many: [2 x <DummyResource id=DummyResource:A' in as_list
         assert 'many: [2 x <DummyResource id=DummyResource:A' in as_dict
+
+
+@tpp.stateless_transition(allow_multiprocess_pool=True, retries_count=2)
+async def append_suffix(in_resources, out_resources, *, suffix: str) -> tuple[bool, str | None]:
+    """Module level, so instances pickle.
+
+    Args:
+      in_resources.src: DummyResource
+      out_resources.dst: DummyResource
+    """
+    out_resources.dst.populate_data(in_resources.src.data + suffix)
+    return True, None
+
+
+def test_stateless_transition():
+    @tpp.stateless_transition
+    def fail(in_resources, out_resources):
+        return False, 'boom'
+
+    src = DummyResource('IN').populate_data('d').update_status(tpp.ResourceStatus.READY)
+    dst = DummyResource('OUT')
+    t = append_suffix('append', suffix='!', in_src=src, out_dst=dst).compile()
+
+    # a class of the function's name; in_ / out_ prefixes dropped; decorator keywords reach the instance
+    assert isinstance(append_suffix, type) and append_suffix.__name__ == 'append_suffix'
+    assert append_suffix.__doc__.startswith('Module level, so instances pickle.')
+    assert [r.id.in_class_id for r in t.in_resources_flat()] == ['IN']
+    assert (t.allow_multiprocess_pool, t._retries_count) == (True, 2)
+    assert asyncio.run(t.execute()) == (True, None)  # async fn awaited, config passed
+    assert dst.data == 'd!'
+    assert asyncio.run(fail('fail').compile().execute()) == (False, 'boom')  # bare decorator, plain fn
+    assert (fail('fail').allow_multiprocess_pool, fail('fail')._retries_count) == (False, 1)
+    # pickles by name, as the pool needs
+    assert type(pickle.loads(pickle.dumps(t))) is append_suffix
+    # a wrong config name fails at construction
+    with pytest.raises(TypeError):
+        append_suffix('append', sufix='!', in_src=src, out_dst=dst)
+
+def test_typed_transition():
+    class CopyTransition(tpp.TypedTransition):
+        suffix: str
+        in_src: DummyResource
+        in_more: dict
+        out_dst: DummyResource
+
+        @override
+        async def _execute_impl(self, in_resources, out_resources):
+            out_resources.dst.populate_data(in_resources.src.data + self.suffix)
+            return True, None
+
+    src = DummyResource('IN').populate_data('d').update_status(tpp.ResourceStatus.READY)
+    more = {'k': DummyResource('MORE').populate_data('m').update_status(tpp.ResourceStatus.READY)}
+    dst = DummyResource('OUT')
+    t = CopyTransition('copy', suffix='!', in_src=src, in_more=more, out_dst=dst).compile()
+
+    # in_ / out_ prefixes dropped in the wiring; a keyed dict flattens; config kept under its own name
+    assert [r.id.in_class_id for r in t.in_resources_flat()] == ['IN', 'MORE']
+    assert [r.id.in_class_id for r in t.out_resources_flat()] == ['OUT']
+    assert t.suffix == '!' and t.name == 'copy'
+    assert (t.allow_multiprocess_pool, t._retries_count) == (False, 1)  # base defaults
+    assert asyncio.run(t.execute()) == (True, None)
+    assert dst.data == 'd!'
+    # missing or extra keyword
+    with pytest.raises(AssertionError, match='takes'):
+        CopyTransition('copy', suffix='!', in_src=src, in_more=more)
+    with pytest.raises(AssertionError, match='takes'):
+        CopyTransition('copy', suffix='!', in_src=src, in_more=more, out_dst=dst, extra=1)
+
+
+def test_typed_transition_inheritance():
+    class BaseCopy(tpp.TypedTransition, allow_multiprocess_pool=True, retries_count=3):
+        in_src: DummyResource
+
+        @override
+        async def _execute_impl(self, in_resources, out_resources):
+            return True, None
+
+    class TaggedCopy(BaseCopy):
+        tag: str
+        out_dst: DummyResource
+
+        def __post_init__(self):
+            self._label = f'{self.tag}:{self.name}'
+
+    class PlainCopy(BaseCopy):
+        out_dst: DummyResource
+
+    t = TaggedCopy('copy', tag='x', in_src=DummyResource('IN'), out_dst=DummyResource('OUT'))
+
+    # parent annotations count; __post_init__ sees the fields; siblings keep their own names
+    assert [r.id.in_class_id for r in t.in_resources_flat()] == ['IN']
+    assert t._label == 'x:copy'
+    with pytest.raises(AssertionError, match=r"PlainCopy takes \['in_src', 'out_dst'\]"):
+        PlainCopy('copy', tag='x', in_src=DummyResource('IN'), out_dst=DummyResource('OUT'))
+    # class keywords reach the parent's instances only: a subclass starts from the defaults again
+    base = BaseCopy('base', in_src=DummyResource('IN'))
+    assert (base.allow_multiprocess_pool, base._retries_count) == (True, 3)
+    assert (t.allow_multiprocess_pool, t._retries_count) == (False, 1)
+    # an own __init__ is refused when the class is made
+    with pytest.raises(AssertionError, match='no __init__ of its own'):
+        class OwnInit(tpp.TypedTransition):
+            def __init__(self):
+                pass

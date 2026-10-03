@@ -93,8 +93,8 @@ class TestCaptureCliStdoutTransition(BaseTest):
         out = tpp.TxtResource('out')
         assert self.run(std.CaptureCliStdoutTransition(
             'T', False, out,
-            {'bin_file': tpp.TxtResource('bin', '/bin/x'),
-             'url_str': tpp.TxtResource('url', 'u')},
+            dict(bin_file=tpp.TxtResource('bin', '/bin/x'),
+                 url_str=tpp.TxtResource('url', 'u')),
             '{bin_file}', '-F', '"{url_str}"')) == (True, None)
         assert mocks.shell == ['/bin/x -F "u"']
         assert (out.data, out.status.name) == ('OUT', 'READY')

@@ -108,7 +108,9 @@ class ResourcesLazyZipArchive:
                      extract_key_regexp: str) -> list[str]:
         """The keys a named index files under `group_key`, sorted; a ticker's copies, say.
 
-        `idx_name` must be unique per regexp: one name is one index.
+        Args:
+          idx_name: unique per regexp; one name is one index.
+          extract_key_regexp: over a stored key; its group is the key it files under.
         """
         return self._index(member, idx_name, extract_key_regexp).get(group_key, [])
 

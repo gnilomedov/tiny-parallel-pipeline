@@ -1,5 +1,5 @@
-from .resource import ResourceStatus, ResourceID, Resource
-from .transition import MilestoneTransition, TransitionCalculation
+from .resource import ResourceStatus, ResourceID, Resource, ResourceData
+from .transition import MilestoneTransition, TransitionCalculation, TypedTransition, stateless_transition
 from .execute import Scheduler, Executor
 from .utils.resources_std import FileResource, TxtResource, UrlStrResource
 from .utils.resources_lazy_zip_archive import (
@@ -17,6 +17,7 @@ __all__ = [
     'MilestoneTransition',
     'Pipeline',
     'Resource',
+    'ResourceData',
     'ResourcesLazyZipArchive',
     'ResourceID',
     'ResourceStatus',
@@ -24,6 +25,7 @@ __all__ = [
     'Scheduler',
     'TransitionCalculation',
     'TransitionsDir',
+    'TypedTransition',
     'TxtResource',
     'UrlStrResource',
     'WgetUrlTransition',
@@ -33,4 +35,5 @@ __all__ = [
     'parse_csv_2_df',
     'parse_json',
     'run_shell',
+    'stateless_transition',
 ]

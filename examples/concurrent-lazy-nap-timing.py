@@ -80,26 +80,25 @@ class TotalTxtResource(tpp.Resource):
         super().__init__(in_class_id='total')
 
 
-class NapTransition(tpp.TransitionCalculation):
+class NapTransition(tpp.TypedTransition):
     """One worker: a few short naps, each timed and written down."""
 
-    def __init__(self, name: str, archive: tpp.ResourcesLazyZipArchive,
-                 out_times: NapTimesResource):
-        super().__init__(name)
-        self._set_out_resources(times=out_times)
-        self._worker = out_times.id.in_class_id
-        self._archive = archive
+    archive: tpp.ResourcesLazyZipArchive
+    out_times: NapTimesResource
+
+    def __post_init__(self):
+        self._worker = self._out_resources['times'].id.in_class_id
 
     @override
     def _check_lazy_available_impl(self, in_resources: SimpleNamespace,
                                    out_resources: SimpleNamespace) -> None:
-        if self._archive.is_stored(self._worker, TIMES_MEMBER):
+        if self.archive.is_stored(self._worker, TIMES_MEMBER):
             out_resources.times.update_status(tpp.ResourceStatus.LAZY_AVAILABLE)
 
     @override
     async def _execute_impl(self, in_resources: SimpleNamespace,
                             out_resources: SimpleNamespace) -> tuple[bool, str | None]:
-        if self._archive.populate_if_stored(self._worker, TIMES_MEMBER, str,
+        if self.archive.populate_if_stored(self._worker, TIMES_MEMBER, str,
                                             out_resources.times):
             return True, None
         lines = []
@@ -111,70 +110,59 @@ class NapTransition(tpp.TransitionCalculation):
         return True, None
 
 
-class SynthesizeNapTransition(tpp.TransitionCalculation):
-    """Blows one worker's lines up to something worth collecting."""
+@tpp.stateless_transition
+def synthesize_nap(in_resources: SimpleNamespace, out_resources: SimpleNamespace) -> tuple[bool, str | None]:
+    """Blows one worker's lines up to something worth collecting.
 
-    def __init__(self, name: str, in_times: NapTimesResource,
-                 out_synthesized: SynthesizedTimesResource):
-        super().__init__(name)
-        self._set_in_resources(times=in_times)
-        self._set_out_resources(synthesized=out_synthesized)
-
-    @override
-    async def _execute_impl(self, in_resources: SimpleNamespace,
-                            out_resources: SimpleNamespace) -> tuple[bool, str | None]:
-        block = in_resources.times.data + '\n'
-        out_resources.synthesized.populate_data(block * (SYNTHESIZED_BYTES // len(block)))
-        return True, None
+    Args:
+      in_resources.times: NapTimesResource
+      out_resources.synthesized: SynthesizedTimesResource
+    """
+    block = in_resources.times.data + '\n'
+    out_resources.synthesized.populate_data(block * (SYNTHESIZED_BYTES // len(block)))
+    return True, None
 
 
-class TotalTransition(tpp.TransitionCalculation):
+class TotalTransition(tpp.TypedTransition):
     """Stores every worker's lines, then reads them back and adds the naps up."""
 
-    def __init__(self, name: str, archive: tpp.ResourcesLazyZipArchive,
-                 in_times: dict[str, NapTimesResource], out_total: TotalTxtResource):
-        super().__init__(name)
-        self._set_in_resources(times=in_times)
-        self._set_out_resources(total=out_total)
-        self._archive = archive
+    archive: tpp.ResourcesLazyZipArchive
+    in_times: dict[str, NapTimesResource]
+    out_total: TotalTxtResource
 
     @override
     async def _execute_impl(self, in_resources: SimpleNamespace,
                             out_resources: SimpleNamespace) -> tuple[bool, str | None]:
-        self._archive.add_all([(worker, r.data) for worker, r
+        self.archive.add_all([(worker, r.data) for worker, r
                                in sorted(in_resources.times.items())
-                               if not self._archive.is_stored(worker, TIMES_MEMBER)],
+                               if not self.archive.is_stored(worker, TIMES_MEMBER)],
                               TIMES_MEMBER)
         # Read back rather than summed in memory: the archive is the record either way.
         slept = datetime.timedelta()
-        for worker in self._archive.stored_keys(TIMES_MEMBER):
-            for line in self._archive.read_or_none(worker, TIMES_MEMBER).splitlines():
+        for worker in self.archive.stored_keys(TIMES_MEMBER):
+            for line in self.archive.read_or_none(worker, TIMES_MEMBER).splitlines():
                 began, ended = (datetime.datetime.strptime(t, STAMP)
                                 for t in line.split(SEPARATOR))
                 slept += ended - began
         out_resources.total.populate_data(
-            f'{len(self._archive.stored_keys(TIMES_MEMBER))} workers slept {slept}')
+            f'{len(self.archive.stored_keys(TIMES_MEMBER))} workers slept {slept}')
         return True, None
 
 
-class MeasureRamAheadGcTransition(tpp.TransitionCalculation):
-    """Last reader of the copies: they cannot be collected before it has taken its reading."""
+@tpp.stateless_transition
+def measure_ram_ahead_gc(in_resources: SimpleNamespace, out_resources: SimpleNamespace) -> tuple[bool, str | None]:
+    """Last reader of the copies: they cannot be collected before it has taken its reading.
 
-    def __init__(self, name: str, in_synthesized: dict[str, SynthesizedTimesResource],
-                 out_measurement: RamConsumptionMeasurementResource):
-        super().__init__(name)
-        self._set_in_resources(synthesized=in_synthesized)
-        self._set_out_resources(measurement=out_measurement)
-
-    @override
-    async def _execute_impl(self, in_resources: SimpleNamespace,
-                            out_resources: SimpleNamespace) -> tuple[bool, str | None]:
-        held = sum(len(r.data) for r in in_resources.synthesized.values())
-        out_resources.measurement.populate_data(
-            f'{_resident_mb():.0f} Mb resident, of it {held / 1024 ** 2:.0f} Mb '
-            f'in {len(in_resources.synthesized)} copies')
-        print(f'[INFO] ahead of GC: {out_resources.measurement.data}')
-        return True, None
+    Args:
+      in_resources.synthesized: dict[str, SynthesizedTimesResource]
+      out_resources.measurement: RamConsumptionMeasurementResource
+    """
+    held = sum(len(r.data) for r in in_resources.synthesized.values())
+    out_resources.measurement.populate_data(
+        f'{_resident_mb():.0f} Mb resident, of it {held / 1024 ** 2:.0f} Mb '
+        f'in {len(in_resources.synthesized)} copies')
+    print(f'[INFO] ahead of GC: {out_resources.measurement.data}')
+    return True, None
 
 
 class MeasureRamPostGcMilestone(tpp.MilestoneTransition):
@@ -208,13 +196,14 @@ class NapPipeline(tpp.Pipeline):
     class Transitions(tpp.TransitionsDir):
         def __init__(self, res: 'NapPipeline.Resources',
                      archive: tpp.ResourcesLazyZipArchive):
-            self.naps = [NapTransition(f'nap-{worker}', archive, r)
+            self.naps = [NapTransition(f'nap-{worker}', archive=archive, out_times=r)
                          for worker, r in sorted(res.times.items())]
-            self.synthesize = [SynthesizeNapTransition(f'synthesize-{worker}', res.times[worker], r)
+            self.synthesize = [synthesize_nap(f'synthesize-{worker}', in_times=res.times[worker], out_synthesized=r)
                                for worker, r in sorted(res.synthesized.items())]
-            self.total = TotalTransition('total', archive, res.times, res.total)
-            self.ram_ahead_gc = MeasureRamAheadGcTransition('measure-ram-ahead-gc',
-                                                            res.synthesized, res.ram_ahead_gc)
+            self.total = TotalTransition('total', archive=archive, in_times=res.times, out_total=res.total)
+            self.ram_ahead_gc = measure_ram_ahead_gc('measure-ram-ahead-gc',
+                                                     in_synthesized=res.synthesized,
+                                                     out_measurement=res.ram_ahead_gc)
             self.ram_post_gc = MeasureRamPostGcMilestone('measure-ram-post-gc', res.total,
                                                          res.ram_ahead_gc)
 

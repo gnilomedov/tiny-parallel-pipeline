@@ -1,10 +1,11 @@
 """Transitions: the steps that turn input resources into output resources."""
 
 
+import inspect
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
-from typing import Self
+from typing import Self, dataclass_transform, override
 
 
 from tiny_parallel_pipeline import ResourceStatus, Resource
@@ -149,6 +150,105 @@ class MilestoneTransition(TransitionCalculation):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.force_schedule: bool = False  # Otherwise scheduled IFF all its in resources are scheduled anyway.
+
+
+def stateless_transition(execute_fn: Callable | None = None, *, allow_multiprocess_pool: bool = False,
+                         retries_count: int = 1):
+    """Decorator: turns `execute_fn(in_resources, out_resources, **config)` into a transition class of its name.
+
+    Constructed like a `TypedTransition`: `in_x` / `out_x` keywords wire resource `x`, any other keyword is config
+    handed to `execute_fn`. Defined at module level, the class pickles by name, so the pool can take it.
+
+    The decorated function **MUST** declare in its docstring every resource it uses, as
+    `in_resources.<field>: <type>` / `out_resources.<field>: <type>`: nothing else shows them, and nothing checks them.
+
+    E.g.:
+    @tpp.stateless_transition(retries_count=3)
+    async def run_step(in_resources, out_resources, *, some_config: str) -> tuple[bool, str | None]:
+        \"\"\"Joins foo and the config into bar.
+
+        Args:
+          in_resources.token_foo: TokenFooResource
+          out_resources.token_bar: TokenBarResource
+        \"\"\"
+        out_resources.token_bar.populate_data(f'{in_resources.token_foo.data} {some_config}')
+        return True, None
+
+    E.g. to init:
+    step = run_step('step-me', some_config='config',
+                    in_token_foo=res.token_foo,
+                    out_token_bar=res.token_bar)
+    """
+    def decorate(fn: Callable) -> type[TransitionCalculation]:
+        class _StatelessTransition(TransitionCalculation):
+            def __init__(self, name: str, **values):
+                super().__init__(name, allow_multiprocess_pool=allow_multiprocess_pool, retries_count=retries_count)
+                self._set_in_resources(**{n.removeprefix('in_'): v for n, v in values.items() if n.startswith('in_')})
+                self._set_out_resources(**{n.removeprefix('out_'): v for n, v in values.items()
+                                           if n.startswith('out_')})
+                self._config = {n: v for n, v in values.items() if not n.startswith(('in_', 'out_'))}
+                inspect.signature(fn).bind(None, None, **self._config)  # a wrong config name fails here, not later
+
+            @override
+            async def _execute_impl(self, in_resources: SimpleNamespace,
+                                    out_resources: SimpleNamespace) -> tuple[bool, str | None]:
+                result = fn(in_resources, out_resources, **self._config)
+                return await result if inspect.isawaitable(result) else result
+
+        _StatelessTransition.__name__ = fn.__name__
+        _StatelessTransition.__qualname__ = fn.__qualname__
+        _StatelessTransition.__module__ = fn.__module__
+        _StatelessTransition.__doc__ = fn.__doc__
+        return _StatelessTransition
+
+    return decorate(execute_fn) if execute_fn is not None else decorate
+
+
+@dataclass_transform(kw_only_default=True)
+class TypedTransition(TransitionCalculation):
+    """Builds `__init__(name, *, ...)` from the subclass's annotations, as a dataclass does.
+
+    `in_x` / `out_x` wire resource `x`; any other annotation `y` is config, kept as `self.y`. An optional
+    `__post_init__` derives the rest; class keywords set `allow_multiprocess_pool` and `retries_count`:
+
+    E.g.:
+    class BakeTransition(tpp.TypedTransition, retries_count=3):
+        archive: CorpusArchive
+        in_token: InTockenResource
+        out_tocken: OutTockenResource
+
+        def __post_init__(self):
+            self._state_field = "state"
+
+        @override
+        async def _execute_impl(self, in_resources, out_resources):
+            return True, None
+
+    E.g. to init:
+    bake = BakeTransition('bake-me', archive=archive,
+                          in_token=res.token_foo,
+                          out_tocken=res.tocken_bar)
+    """
+
+    def __init_subclass__(cls, allow_multiprocess_pool: bool = False, retries_count: int = 1, **kwargs):
+        super().__init_subclass__(**kwargs)
+        assert '__init__' not in cls.__dict__, f'{cls.__name__}: no __init__ of its own, derive in __post_init__'
+        names = [n for klazz in reversed(cls.__mro__) if issubclass(klazz, TypedTransition)
+                 for n in inspect.get_annotations(klazz)]
+
+        def __init__(self, name: str, **values):
+            assert sorted(values) == sorted(names), f'{cls.__name__} takes {sorted(names)}, got {sorted(values)}'
+            TransitionCalculation.__init__(self, name, allow_multiprocess_pool=allow_multiprocess_pool,
+                                           retries_count=retries_count)
+            self._set_in_resources(**{n.removeprefix('in_'): v for n, v in values.items() if n.startswith('in_')})
+            self._set_out_resources(**{n.removeprefix('out_'): v for n, v in values.items() if n.startswith('out_')})
+            for n, v in values.items():
+                if not n.startswith(('in_', 'out_')):
+                    setattr(self, n, v)
+            if hasattr(self, '__post_init__'):
+                self.__post_init__()
+
+        cls.__init__ = __init__
 
 
 def _flatten(resources: NamedResources) -> Iterator[Resource]:

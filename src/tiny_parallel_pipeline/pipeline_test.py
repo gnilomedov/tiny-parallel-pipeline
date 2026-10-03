@@ -52,9 +52,9 @@ def transitions(resources):
     class Transitions(tpp.TransitionsDir):
         def __init__(self):
             self.first = DummyTransitionCalculation(
-                'T1', {'seed': resources.seed}, {'a': resources.leaf.a})
+                'T1', dict(seed=resources.seed), dict(a=resources.leaf.a))
             self.second = DummyTransitionCalculation(
-                'T2', {'a': resources.leaf.a}, {'b': resources.leaf.b})
+                'T2', dict(a=resources.leaf.a), dict(b=resources.leaf.b))
     return Transitions()
 
 
@@ -129,16 +129,16 @@ class TestDir:
         class Transitions(tpp.TransitionsDir):
             def __init__(self):
                 self.many = [
-                    DummyTransitionCalculation('T1', {}, {'a': resources.leaf.a}),
-                    DummyTransitionCalculation('T2', {}, {'b': resources.leaf.b})]
+                    DummyTransitionCalculation('T1', {}, dict(a=resources.leaf.a)),
+                    DummyTransitionCalculation('T2', {}, dict(b=resources.leaf.b))]
         assert [t.name for t in Transitions().walk_values()] == ['T1', 'T2']
 
     def test_walk_values_flattens_dicts(self, resources):
         class Transitions(tpp.TransitionsDir):
             def __init__(self):
                 self.many = {
-                    'a': DummyTransitionCalculation('T1', {}, {'a': resources.leaf.a}),
-                    'b': DummyTransitionCalculation('T2', {}, {'b': resources.leaf.b})}
+                    'a': DummyTransitionCalculation('T1', {}, dict(a=resources.leaf.a)),
+                    'b': DummyTransitionCalculation('T2', {}, dict(b=resources.leaf.b))}
         assert [t.name for t in Transitions().walk_values()] == ['T1', 'T2']
 
 
@@ -174,7 +174,7 @@ class TestPipeline:
         class Transitions(tpp.TransitionsDir):
             def __init__(self):
                 self.only = DummyTransitionCalculation(  # leaf.b has no producer
-                    'T1', {'b': resources.leaf.b}, {'a': resources.leaf.a})
+                    'T1', dict(b=resources.leaf.b), dict(a=resources.leaf.a))
         with pytest.raises(AssertionError, match='No transition to calculate'):
             tpp.Executor(tpp.Pipeline('one', resources, Transitions())).compile_scheduler()
 

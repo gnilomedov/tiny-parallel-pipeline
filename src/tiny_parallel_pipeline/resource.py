@@ -5,7 +5,10 @@ from abc import ABC
 from dataclasses import dataclass, field, InitVar
 from enum import Enum, auto
 from functools import total_ordering
-from typing import Any, Self
+from typing import TYPE_CHECKING, Self
+
+if TYPE_CHECKING:
+    import pandas  # a hint only: pandas is not a dep of this package
 
 
 class ResourceStatus(Enum):
@@ -45,9 +48,13 @@ class ResourceID:
         return f'{self.resource_class.__name__}:{self.in_class_id}'
 
 
+class ResourceData:
+    """Marker: a Resource's .data that is a struct, not a plain str / bool / int / DataFrame, inherits this."""
+
+
 @dataclass
 class Resource(ABC):
-    """.data: Any -- one value in the pipeline, written by one transition and read by later ones."""
+    """.data: one value in the pipeline, written by one transition and read by later ones."""
     # e.g. `class MyResource(Resource):` this will be id in domain of MyResource
     # i.e. id of partucular instance of MyResource
     in_class_id: InitVar[str]
@@ -55,7 +62,7 @@ class Resource(ABC):
     id: ResourceID = field(init=False)
     status: ResourceStatus = ResourceStatus.EMPTY
     failed_reason: str | None = None
-    data: Any = None
+    data: 'bool | int | str | pandas.DataFrame | list | tuple | dict | ResourceData | None' = None
     garbage_collection_allowed: bool = True
 
     def __post_init__(self, in_class_id: str) -> None:
@@ -67,7 +74,8 @@ class Resource(ABC):
         self.failed_reason = failed_reason
         return self
 
-    def populate_data(self, new_data: Any) -> Self:
+    def populate_data(
+            self, new_data: 'bool | int | str | pandas.DataFrame | list | tuple | dict | ResourceData | None') -> Self:
         self.data = new_data
         return self
 
