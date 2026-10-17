@@ -232,21 +232,32 @@ class TestListValuedResources:
         assert 'many: [2 x <DummyResource id=DummyResource:A' in as_dict
 
 
-@tpp.stateless_transition(allow_multiprocess_pool=True, retries_count=2)
-async def append_suffix(in_resources, out_resources, *, suffix: str) -> tuple[bool, str | None]:
-    """Module level, so instances pickle.
+def test_set_retries_count_and_allow_multiprocess_pool():
+    calls = []
 
-    Args:
-      in_resources.src: DummyResource
-      out_resources.dst: DummyResource
-    """
-    out_resources.dst.populate_data(in_resources.src.data + suffix)
+    @tpp.stateless_transition()
+    def flaky():
+        calls.append(1)
+        return (True, None) if len(calls) > 1 else (False, 'flaky')
+
+    t = flaky('flaky').set_retries_count(2).set_allow_multiprocess_pool(True)
+
+    # this instance only: the decorator's defaults stay for the next one; the retry really happens
+    assert (t.allow_multiprocess_pool, t._retries_count) == (True, 2)
+    assert (flaky('other').allow_multiprocess_pool, flaky('other')._retries_count) == (False, 1)
+    assert asyncio.run(t.compile().execute()) == (True, None) and len(calls) == 2
+
+
+@tpp.stateless_transition(allow_multiprocess_pool=True, retries_count=2)
+async def append_suffix(suffix: str, in_src: DummyResource, out_dst: DummyResource) -> tuple[bool, str | None]:
+    """Module level, so instances pickle."""
+    out_dst.populate_data(in_src.data + suffix)
     return True, None
 
 
 def test_stateless_transition():
-    @tpp.stateless_transition
-    def fail(in_resources, out_resources):
+    @tpp.stateless_transition()
+    def fail():
         return False, 'boom'
 
     src = DummyResource('IN').populate_data('d').update_status(tpp.ResourceStatus.READY)
@@ -255,18 +266,28 @@ def test_stateless_transition():
 
     # a class of the function's name; in_ / out_ prefixes dropped; decorator keywords reach the instance
     assert isinstance(append_suffix, type) and append_suffix.__name__ == 'append_suffix'
-    assert append_suffix.__doc__.startswith('Module level, so instances pickle.')
+    assert append_suffix.__doc__ == 'Module level, so instances pickle.'
     assert [r.id.in_class_id for r in t.in_resources_flat()] == ['IN']
+    assert [r.id.in_class_id for r in t.out_resources_flat()] == ['OUT']
     assert (t.allow_multiprocess_pool, t._retries_count) == (True, 2)
-    assert asyncio.run(t.execute()) == (True, None)  # async fn awaited, config passed
+    assert asyncio.run(t.execute()) == (True, None)  # async fn awaited; config and the Resources themselves passed
     assert dst.data == 'd!'
-    assert asyncio.run(fail('fail').compile().execute()) == (False, 'boom')  # bare decorator, plain fn
+    assert asyncio.run(fail('fail').compile().execute()) == (False, 'boom')  # no flags, plain fn
     assert (fail('fail').allow_multiprocess_pool, fail('fail')._retries_count) == (False, 1)
     # pickles by name, as the pool needs
     assert type(pickle.loads(pickle.dumps(t))) is append_suffix
-    # a wrong config name fails at construction
-    with pytest.raises(TypeError):
-        append_suffix('append', sufix='!', in_src=src, out_dst=dst)
+    # misconfigured: fails at construction, not at execute time
+    for wrong in ({'sufix': '!', 'in_src': src, 'out_dst': dst},  # misspelled
+                  {'suffix': '!', 'in_src': src},  # missing
+                  {'suffix': '!', 'in_src': src, 'out_dst': dst, 'in_more': src}):  # extra
+        with pytest.raises(TypeError):
+            append_suffix('append', **wrong)
+    # malformed fn: fails when decorated
+    with pytest.raises(AssertionError, match='keyword parameters only'):
+        tpp.stateless_transition()(lambda **values: (True, None))
+    with pytest.raises(AssertionError, match='transition name'):
+        tpp.stateless_transition()(lambda name: (True, None))
+
 
 def test_typed_transition():
     class CopyTransition(tpp.TypedTransition):
@@ -333,3 +354,64 @@ def test_typed_transition_inheritance():
         class OwnInit(tpp.TypedTransition):
             def __init__(self):
                 pass
+
+
+def test_lazy_available_kept_into_execute_impl():
+    class CachedTransition(tpp.TypedTransition):
+        out_dst: DummyResource
+
+        @override
+        def _check_lazy_available_impl(self, in_resources, out_resources):
+            out_resources.dst.update_status(tpp.ResourceStatus.LAZY_AVAILABLE)
+
+        @override
+        async def _execute_impl(self, in_resources, out_resources):
+            out_resources.dst.populate_data(
+                'cached' if out_resources.dst.status == tpp.ResourceStatus.LAZY_AVAILABLE else 'computed')
+            return True, None
+
+    lazy = CachedTransition('lazy', out_dst=DummyResource('LAZY')).compile()
+    cold = CachedTransition('cold', out_dst=DummyResource('COLD')).compile()
+    lazy.check_lazy_available()
+
+    # the marker reaches _execute_impl; READY after the run either way
+    assert asyncio.run(lazy.execute()) == asyncio.run(cold.execute()) == (True, None)
+    assert [(r.data, r.status) for t in (lazy, cold) for r in t.out_resources_flat()] == [
+        ('cached', tpp.ResourceStatus.READY), ('computed', tpp.ResourceStatus.READY)]
+
+
+def _in_cache(cache: dict, in_key: DummyResource) -> bool:
+    return in_key.data in cache
+
+
+@tpp.stateless_transition(lazy_check_fn=_in_cache)
+def look_up(cache: dict, in_key: DummyResource, in_heavy: DummyResource, out_value: DummyResource) -> tuple[bool, None]:
+    """Cached path reads only the key; the heavy input is None there."""
+    if out_value.status == tpp.ResourceStatus.LAZY_AVAILABLE:
+        out_value.populate_data(f'cached {cache[in_key.data]} heavy={in_heavy}')
+    else:
+        out_value.populate_data(f'computed from {in_heavy.data}')
+    return True, None
+
+
+def test_stateless_transition_lazy_check_fn():
+    ready = lambda name, data: DummyResource(name).populate_data(data).update_status(tpp.ResourceStatus.READY)
+    make = lambda key: look_up('look-up', cache={'k': 'v'}, in_key=ready('KEY', key), in_heavy=ready('HEAVY', 'h'),
+                               out_value=DummyResource('VALUE')).compile()
+    cached = make('k')
+    cold = make('other')
+
+    # cached: output marked, only the input the lazy fn names kept, fn takes the cached path with heavy=None
+    cached.check_lazy_available()
+    assert [r.id.in_class_id for r in cached.in_resources_flat()] == ['KEY']
+    assert [r.status for r in cached.out_resources_flat()] == [tpp.ResourceStatus.LAZY_AVAILABLE]
+    assert asyncio.run(cached.execute()) == (True, None)
+    assert [r.data for r in cached.out_resources_flat()] == ['cached v heavy=None']
+    # not cached: nothing marked or dropped, computed
+    cold.check_lazy_available()
+    assert [r.id.in_class_id for r in cold.in_resources_flat()] == ['KEY', 'HEAVY']
+    assert asyncio.run(cold.execute()) == (True, None)
+    assert [r.data for r in cold.out_resources_flat()] == ['computed from h']
+    # a lazy fn naming a keyword fn does not have: fails when decorated
+    with pytest.raises(AssertionError, match='beyond its keywords'):
+        tpp.stateless_transition(lazy_check_fn=lambda in_other: True)(lambda in_key: (True, None))

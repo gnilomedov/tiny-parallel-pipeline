@@ -1,5 +1,6 @@
 from unittest import mock
 
+from tiny_parallel_pipeline import Resource, ResourceStatus
 from tiny_parallel_pipeline.utils.resources_lazy_zip_archive import ResourcesLazyZipArchive
 
 
@@ -59,6 +60,26 @@ def test_is_stored(reader_zip):
     # Presence only, off the central directory: nothing is read or parsed.
     assert archive.is_stored('AAPL', MEMBER)
     assert not archive.is_stored('NVDA', MEMBER)
+
+
+@mock.patch.object(ResourcesLazyZipArchive, 'read_or_none')
+def test_populate_if_stored(read_or_none):
+    archive = ResourcesLazyZipArchive('/nowhere/a.zip')
+    marked = lambda: Resource('R').update_status(ResourceStatus.LAZY_AVAILABLE)
+    read_or_none.return_value = 'text'
+    loaded = marked()
+    unmarked = Resource('U')
+
+    # marked by the lazy check and stored: loaded, READY
+    assert archive.populate_if_stored('k', 'm/{key}', str.upper, loaded)
+    assert (loaded.data, loaded.status) == ('TEXT', ResourceStatus.READY)
+    # not marked: untouched, the archive is not even read
+    read_or_none.reset_mock()
+    assert not archive.populate_if_stored('k', 'm/{key}', str.upper, unmarked)
+    assert (unmarked.data, unmarked.status, read_or_none.called) == (None, ResourceStatus.EMPTY, False)
+    # marked but gone: False, so the caller computes it
+    read_or_none.return_value = None
+    assert not archive.populate_if_stored('k', 'm/{key}', str.upper, marked())
 
 
 @mock.patch.object(ResourcesLazyZipArchive, '_reader_zip')

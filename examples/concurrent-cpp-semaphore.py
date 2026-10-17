@@ -89,16 +89,11 @@ PYBIND11_MODULE(gate, m) {
 '''
 
 
-@tpp.stateless_transition
-async def compile_cpp(in_resources, out_resources) -> tuple[bool, str | None]:
-    """Compiles the `cpp_file` input into the `so_file` output, skipping when the .so is newer.
-
-    Args:
-      in_resources.cpp_file: tpp.FileResource
-      out_resources.so_file: tpp.FileResource
-    """
-    cpp_path = in_resources.cpp_file.data
-    so_path = out_resources.so_file.expect_ready_file_at
+@tpp.stateless_transition()
+async def compile_cpp(in_cpp_file: tpp.FileResource, out_so_file: tpp.FileResource) -> tuple[bool, str | None]:
+    """Compiles the `cpp_file` input into the `so_file` output, skipping when the .so is newer."""
+    cpp_path = in_cpp_file.data
+    so_path = out_so_file.expect_ready_file_at
     if os.path.exists(so_path) and os.path.getmtime(so_path) > os.path.getmtime(cpp_path):
         print(f'[INFO] compile skipped, {so_path} is newer than the .cpp')
     else:
@@ -113,7 +108,7 @@ async def compile_cpp(in_resources, out_resources) -> tuple[bool, str | None]:
         if not is_ok:
             return False, err_msg
         print(f'[INFO] compiled {so_path}')
-    out_resources.so_file.populate_data(so_path).update_status(tpp.ResourceStatus.READY)
+    out_so_file.populate_data(so_path).update_status(tpp.ResourceStatus.READY)
     return True, None
 
 

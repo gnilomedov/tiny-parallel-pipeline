@@ -110,16 +110,11 @@ class NapTransition(tpp.TypedTransition):
         return True, None
 
 
-@tpp.stateless_transition
-def synthesize_nap(in_resources: SimpleNamespace, out_resources: SimpleNamespace) -> tuple[bool, str | None]:
-    """Blows one worker's lines up to something worth collecting.
-
-    Args:
-      in_resources.times: NapTimesResource
-      out_resources.synthesized: SynthesizedTimesResource
-    """
-    block = in_resources.times.data + '\n'
-    out_resources.synthesized.populate_data(block * (SYNTHESIZED_BYTES // len(block)))
+@tpp.stateless_transition()
+def synthesize_nap(in_times: NapTimesResource, out_synthesized: SynthesizedTimesResource) -> tuple[bool, str | None]:
+    """Blows one worker's lines up to something worth collecting."""
+    block = in_times.data + '\n'
+    out_synthesized.populate_data(block * (SYNTHESIZED_BYTES // len(block)))
     return True, None
 
 
@@ -149,19 +144,15 @@ class TotalTransition(tpp.TypedTransition):
         return True, None
 
 
-@tpp.stateless_transition
-def measure_ram_ahead_gc(in_resources: SimpleNamespace, out_resources: SimpleNamespace) -> tuple[bool, str | None]:
-    """Last reader of the copies: they cannot be collected before it has taken its reading.
-
-    Args:
-      in_resources.synthesized: dict[str, SynthesizedTimesResource]
-      out_resources.measurement: RamConsumptionMeasurementResource
-    """
-    held = sum(len(r.data) for r in in_resources.synthesized.values())
-    out_resources.measurement.populate_data(
+@tpp.stateless_transition()
+def measure_ram_ahead_gc(in_synthesized: dict[str, SynthesizedTimesResource],
+                         out_measurement: RamConsumptionMeasurementResource) -> tuple[bool, str | None]:
+    """Last reader of the copies: they cannot be collected before it has taken its reading."""
+    held = sum(len(r.data) for r in in_synthesized.values())
+    out_measurement.populate_data(
         f'{_resident_mb():.0f} Mb resident, of it {held / 1024 ** 2:.0f} Mb '
-        f'in {len(in_resources.synthesized)} copies')
-    print(f'[INFO] ahead of GC: {out_resources.measurement.data}')
+        f'in {len(in_synthesized)} copies')
+    print(f'[INFO] ahead of GC: {out_measurement.data}')
     return True, None
 
 

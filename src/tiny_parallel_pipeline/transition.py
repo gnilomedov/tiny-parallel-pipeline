@@ -5,7 +5,7 @@ import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
-from typing import Self, dataclass_transform, override
+from typing import Concatenate, ParamSpec, Self, dataclass_transform, override
 
 
 from tiny_parallel_pipeline import ResourceStatus, Resource
@@ -40,6 +40,14 @@ class TransitionCalculation(ABC):
         self._compiled = True
         return self
 
+    def set_allow_multiprocess_pool(self, allow_multiprocess_pool: bool) -> Self:
+        self._allow_multiprocess_pool = allow_multiprocess_pool
+        return self
+
+    def set_retries_count(self, retries_count: int) -> Self:
+        self._retries_count = retries_count
+        return self
+
     def check_lazy_available(self) -> None:
         """Names the resources for `_check_lazy_available_impl`, as `execute` does for its own."""
         self._check_lazy_available_impl(SimpleNamespace(**self._in_resources),
@@ -51,7 +59,8 @@ class TransitionCalculation(ABC):
             assert r.status == ResourceStatus.READY
             assert r.data is not None, str(r)
         for r in self.out_resources_flat():
-            r.update_status(ResourceStatus.IN_PROGRESS)
+            if r.status == ResourceStatus.EMPTY:  # LAZY_AVAILABLE stays: _execute_impl reads it as its lazy marker
+                r.update_status(ResourceStatus.IN_PROGRESS)
 
         for attempt in range(self._retries_count):
             is_ok, err_msg = await self._execute_impl(SimpleNamespace(**self._in_resources),
@@ -152,48 +161,75 @@ class MilestoneTransition(TransitionCalculation):
         self.force_schedule: bool = False  # Otherwise scheduled IFF all its in resources are scheduled anyway.
 
 
-def stateless_transition(execute_fn: Callable | None = None, *, allow_multiprocess_pool: bool = False,
-                         retries_count: int = 1):
-    """Decorator: turns `execute_fn(in_resources, out_resources, **config)` into a transition class of its name.
+_ExecuteFnParams = ParamSpec('_ExecuteFnParams')  # the decorated fn's parameters = the construction keywords
 
-    Constructed like a `TypedTransition`: `in_x` / `out_x` keywords wire resource `x`, any other keyword is config
-    handed to `execute_fn`. Defined at module level, the class pickles by name, so the pool can take it.
 
-    The decorated function **MUST** declare in its docstring every resource it uses, as
-    `in_resources.<field>: <type>` / `out_resources.<field>: <type>`: nothing else shows them, and nothing checks them.
+def stateless_transition(*, allow_multiprocess_pool: bool = False, retries_count: int = 1,
+                         lazy_check_fn: Callable[..., bool] | None = None
+                         ) -> Callable[[Callable[_ExecuteFnParams, object]],
+                                       Callable[Concatenate[str, _ExecuteFnParams], TransitionCalculation]]:
+    """Decorator, always called (`@tpp.stateless_transition()`): fn -> a transition class whose wiring is its signature.
+
+    Parameters named `in_x` / `out_x` wire resource `x` and receive the Resource itself; any other is config. The class
+    is built as `<fn name>(name, **the same keywords)`: a missing, extra or misspelled keyword fails at construction,
+    and the ParamSpec lets a type checker flag it earlier. Defined at module level, the class pickles by name.
+
+    `lazy_check_fn(<some of fn's keywords>) -> bool`: True marks every output LAZY_AVAILABLE and drops the inputs it
+    does not name; fn then gets those as None and takes its cached path on `out_x.status == LAZY_AVAILABLE`.
 
     E.g.:
     @tpp.stateless_transition(retries_count=3)
-    async def run_step(in_resources, out_resources, *, some_config: str) -> tuple[bool, str | None]:
-        \"\"\"Joins foo and the config into bar.
-
-        Args:
-          in_resources.token_foo: TokenFooResource
-          out_resources.token_bar: TokenBarResource
-        \"\"\"
-        out_resources.token_bar.populate_data(f'{in_resources.token_foo.data} {some_config}')
+    async def run_step(some_config: str, in_token_foo: TokenFooResource,
+                       out_token_bar: TokenBarResource) -> tuple[bool, str | None]:
+        out_token_bar.populate_data(f'{in_token_foo.data} {some_config}')
         return True, None
 
-    E.g. to init:
-    step = run_step('step-me', some_config='config',
-                    in_token_foo=res.token_foo,
-                    out_token_bar=res.token_bar)
+    E.g. to init; the decorator's flags are defaults, a fluent setter overrides one for this instance only:
+    step = run_step('step-me', some_config='config', in_token_foo=res.token_foo, out_token_bar=res.token_bar)
+    patient_step = run_step('step-patient', some_config='config', in_token_foo=res.token_foo,
+                            out_token_bar=res.token_bar).set_retries_count(10)
     """
     def decorate(fn: Callable) -> type[TransitionCalculation]:
+        signature = inspect.signature(fn)
+        keyword_kinds = (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        assert all(p.kind in keyword_kinds for p in signature.parameters.values()), (
+            f'{fn.__qualname__}: keyword parameters only, no *args / **kwargs')
+        assert 'name' not in signature.parameters, f'{fn.__qualname__}: `name` is the transition name'
+        in_names = [n for n in signature.parameters if n.startswith('in_')]
+        lazy_names = list(inspect.signature(lazy_check_fn).parameters) if lazy_check_fn else []
+        assert set(lazy_names) <= set(signature.parameters), (
+            f'{fn.__qualname__}: lazy_check_fn takes {lazy_names}, beyond its keywords {list(signature.parameters)}')
+
         class _StatelessTransition(TransitionCalculation):
             def __init__(self, name: str, **values):
+                signature.bind(**values)  # a missing, extra or misspelled keyword fails here, not at execute time
                 super().__init__(name, allow_multiprocess_pool=allow_multiprocess_pool, retries_count=retries_count)
                 self._set_in_resources(**{n.removeprefix('in_'): v for n, v in values.items() if n.startswith('in_')})
                 self._set_out_resources(**{n.removeprefix('out_'): v for n, v in values.items()
                                            if n.startswith('out_')})
                 self._config = {n: v for n, v in values.items() if not n.startswith(('in_', 'out_'))}
-                inspect.signature(fn).bind(None, None, **self._config)  # a wrong config name fails here, not later
+
+            @override
+            def _check_lazy_available_impl(self, in_resources: SimpleNamespace, out_resources: SimpleNamespace) -> None:
+                if lazy_check_fn is None:
+                    return
+                keywords = self._keywords(in_resources, out_resources)
+                if lazy_check_fn(**{n: keywords[n] for n in lazy_names}):
+                    for r in self.out_resources_flat():
+                        r.update_status(ResourceStatus.LAZY_AVAILABLE)
+                    for unread in [n for n in self._in_resources if f'in_{n}' not in lazy_names]:
+                        del self._in_resources[unread]
 
             @override
             async def _execute_impl(self, in_resources: SimpleNamespace,
                                     out_resources: SimpleNamespace) -> tuple[bool, str | None]:
-                result = fn(in_resources, out_resources, **self._config)
+                result = fn(**self._keywords(in_resources, out_resources))
                 return await result if inspect.isawaitable(result) else result
+
+            def _keywords(self, in_resources: SimpleNamespace, out_resources: SimpleNamespace) -> dict:
+                # fn's keywords: config, then each in_ / out_ Resource; an input dropped by the lazy check is None.
+                return {**self._config, **{n: getattr(in_resources, n.removeprefix('in_'), None) for n in in_names},
+                        **{f'out_{n}': r for n, r in vars(out_resources).items()}}
 
         _StatelessTransition.__name__ = fn.__name__
         _StatelessTransition.__qualname__ = fn.__qualname__
@@ -201,7 +237,7 @@ def stateless_transition(execute_fn: Callable | None = None, *, allow_multiproce
         _StatelessTransition.__doc__ = fn.__doc__
         return _StatelessTransition
 
-    return decorate(execute_fn) if execute_fn is not None else decorate
+    return decorate
 
 
 @dataclass_transform(kw_only_default=True)

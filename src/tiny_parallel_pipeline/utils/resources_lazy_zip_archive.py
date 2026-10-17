@@ -96,7 +96,12 @@ class ResourcesLazyZipArchive:
     # self._lock: acquires, through read_or_none.
     def populate_if_stored(self, key: str, member: str, parse_fn: Callable[[str], object],
                            out_resource: Resource) -> bool:
-        """The lazy load, for `_execute_impl`: False means nothing was there to load."""
+        """The lazy load, for `_execute_impl`: only an `out_resource` its lazy check marked LAZY_AVAILABLE is loaded.
+
+        False -- not marked, or nothing stored after all -- leaves the caller to compute it.
+        """
+        if out_resource.status != ResourceStatus.LAZY_AVAILABLE:
+            return False
         text = self.read_or_none(key, member)
         if text is None:
             return False
